@@ -235,8 +235,9 @@ class SupervisedWrapper(nn.Module):
 
 class ContrastiveLayerwiseWrapper(nn.Module):
     def __init__(self, args, loss):
+        super(ContrastiveLayerwiseWrapper, self).__init__()
         self.layers = args.feature_layers
-        self.layer_weights = args.feature_layer_weights
+        self.layer_weights = args.feature_layers_weights
         self.loss = loss
         
     def forward(self, first_features, second_features):

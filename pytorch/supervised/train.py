@@ -45,7 +45,7 @@ def normal_step(batch, model, criterion, device, step, optimizer, args):
     loss.backward()
     optimizer.step()
     
-    return first_logits, second_logits, first_features, second_features, y, loss
+    return first_logits, second_logits, first_features[-1], second_features[-1], y, loss
             
 
 def sam_step(batch, model, criterion, device, step, optimizer, args):
@@ -68,7 +68,7 @@ def sam_step(batch, model, criterion, device, step, optimizer, args):
                                         args.sam_second_step, optimizer, args)
     optimizer.second_step()
     
-    return _first_logits, _second_logits, _first_features, _second_features, y, _loss
+    return _first_logits, _second_logits, _first_features[-1], _second_features[-1], y, _loss
     
 
 def _check_nan_grads(model):
@@ -256,7 +256,7 @@ if __name__ == "__main__":
     parser.add_argument("--poly_loss", action="store_true")
     parser.add_argument("--poly_eps", type=float, default=1)
     
-    parser.add_argument("--feature_layers", default="-1", type=lambda x: [float(i) for i in x.split(",")])
+    parser.add_argument("--feature_layers", default="-1", type=lambda x: [int(i) for i in x.split(",")])
     parser.add_argument("--feature_layers_weights", default="1", type=lambda x: [float(i) for i in x.split(",")])
     
     # augmentation
@@ -338,6 +338,8 @@ if __name__ == "__main__":
     parser.add_argument("--transforms_to_track", default="./transforms/crop_hflip_randaug_n2_m19_cutout.pt,./transforms/crop_hflip_randaug_n2_m14_cutout.pt,./transforms/crop_hflip_randaug_n1_m2_cutout.pt,./transforms/crop_hflip.pt")
     parser.add_argument("--num_tests", default=1000, type=int)
     parser.add_argument("--step_finder_scheduler", default="log", choices=["log", "linear"])
+    
+
 
     args = parser.parse_args()
     assert len(args.feature_layers) == len(args.feature_layers_weights), "the length of the args.feature_layers must match args.feature_layers_weights"  
