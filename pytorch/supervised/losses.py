@@ -285,31 +285,46 @@ class CriterionHandler(nn.Module):
         self.step = 0
         self.steps = steps
         self.printed = False
+
         
     def cosine_weight_handler(self):
         if self.cosine_schedule == "constant":
-            return self.contrastive_weight
+            similarity_weight = self.contrastive_weight
         elif self.cosine_schedule == "random":
-            return np.random.uniform(-self.contrastive_weight, self.contrastive_weight)
+            similarity_weight = np.random.uniform(-self.contrastive_weight, self.contrastive_weight)
         elif self.cosine_schedule == "probabilistic":
             if np.random.rand() > 0.5:
-                return self.contrastive_weight
+                similarity_weight = self.contrastive_weight
             else:
-                return -self.contrastive_weight
+                similarity_weight = -self.contrastive_weight
+        
+        elif self.cosine_schedule == "negate_even":
+            if self.step % 2 == 0:
+                similarity_weight = -self.contrastive_weight
+            else:
+                similarity_weight = self.contrastive_weight
+
+        elif self.cosine_schedule == "negate_odd":
+            if self.step % 2 == 0:
+                similarity_weight = self.contrastive_weight
+            else:
+                similarity_weight = -self.contrastive_weight
+
         elif self.cosine_schedule == "warmup":
             if self.step > (self.steps) // 10:
                 if not self.printed:
                     print("cosine warmup done !", flush=True)
                     self.printed=True
-                return self.contrastive_weight
+                similarity_weight = self.contrastive_weight
             
-            cosine = np.linspace(0, self.contrastive_weight, self.steps)[self.step]
-            self.step += 1
-            return cosine
+            similarity_weight = np.linspace(0, self.contrastive_weight, self.steps)[self.step]
+
         elif self.cosine_schedule == "linear":
-            cosine = np.linspace(0, self.contrastive_weight, self.steps)[self.step]
-            self.step += 1
-            return cosine            
+            similarity_weight = np.linspace(0, self.contrastive_weight, self.steps)[self.step]
+
+        self.step += 1
+        return similarity_weight
+
         
     
     def forward(self, first_logits, second_logits, first_features, second_features, y, ce=True, contrastive=True):

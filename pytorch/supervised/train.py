@@ -16,7 +16,7 @@ def cycle(loader):
         for data in loader:
             yield data
             
-def normal_step(batch, model, criterion, device, step, optimizer, args):
+def normal_step(batch, model, criterion, device, step, optimizer, args, sam=False, sam_step="first"):
     model.zero_grad()
     
     first, second, y = [i.to(device, non_blocking=True) for i in batch]
@@ -43,8 +43,14 @@ def normal_step(batch, model, criterion, device, step, optimizer, args):
     loss = criterion(first_logits, second_logits, first_features, second_features, y,
                                      ce=step != "similarity-only", contrastive=(step != "baseline"))    
     loss.backward()
-    optimizer.step()
-    
+    if sam:
+        if sam_step == "first":
+            optimizer.first_step(zero_grad=True)
+        if sam_step == "second":
+            optimizer.second_step(zero_grad=True)
+    else:
+        optimizer.step()
+            
     return first_logits, second_logits, first_features[-1], second_features[-1], y, loss
             
 
@@ -60,12 +66,13 @@ def sam_step(batch, model, criterion, device, step, optimizer, args):
         enable_running_stats(model)
 
     _first_logits, _second_logits, _first_features, _second_features, y, _loss = normal_step(batch, model, criterion, device,
-                                        args.sam_first_step, optimizer, args)
+                                        args.sam_first_step, optimizer, args, sam=True, sam_step="first")
     _loss.backward()        
     optimizer.first_step()
     
     first_logits, y, loss = normal_step(batch, model, criterion, device,
-                                        args.sam_second_step, optimizer, args)
+                                        args.sam_second_step, optimizer, args, 
+                                        sam=True, sam_step="second")
     optimizer.second_step()
     
     return _first_logits, _second_logits, _first_features[-1], _second_features[-1], y, _loss
