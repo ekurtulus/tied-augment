@@ -131,7 +131,20 @@ def acc_topk(logits, labels, topk=(1,5)):
     correct = top == labels.reshape(1, -1)
     return [correct[:k].reshape(-1).sum(axis=0) * 100 / labels.shape[0] for k in topk]
 
-def compute_metrics(first_logits, first_features, second_logits, second_features, labels):
+def compute_eval_metrics(logits, features, labels):
+  loss = cross_entropy_loss(jax.nn.log_softmax(logits.astype(jnp.float32)), 
+                            jax.nn.one_hot(labels, logits.shape[-1], dtype=jnp.float32))  
+  
+  top_1, top_5 = acc_topk(logits, labels)
+  metrics = {
+      'loss': loss,
+      'top-1' : top_1,
+      'top-5' : top_5,
+  }
+  metrics = lax.pmean(metrics, axis_name='batch')
+  return metrics
+
+def compute_train_metrics(first_logits, first_features, second_logits, second_features, labels):
 
   loss = cross_entropy_loss(jax.nn.log_softmax(first_logits.astype(jnp.float32)), 
                             jax.nn.one_hot(labels, first_logits.shape[-1], dtype=jnp.float32))  
@@ -313,7 +326,7 @@ def train_step(state, batch, key, learning_rate_fn, config, tw=-1):
         aux = aux[1]
         
   new_model_state, first_logits, first_features, second_logits, second_features = aux
-  metrics = compute_metrics(first_logits, first_features, second_logits, second_features, batch['label'])
+  metrics = compute_train_metrics(first_logits, first_features, second_logits, second_features, batch['label'])
   metrics['learning_rate'] = lr
 
   new_state = state.apply_gradients(
@@ -342,7 +355,7 @@ def eval_step(state, batch):
   features, logits = state.apply_fn(
       variables, batch['image'], train=False, mutable=False)
   print("eval step compiled ! ")
-  return compute_metrics(logits, batch['label'])
+  return compute_eval_metrics(logits, features, batch['label'])
 
 
 def prepare_tf_data(xs):
@@ -500,9 +513,12 @@ def train_and_evaluate(config) -> TrainState:
     steps_per_eval = config.steps_per_eval
 
   steps_per_checkpoint = steps_per_epoch * 10
-
-  base_learning_rate = config.learning_rate * (config.batch_size / 256.)
-
+  
+  if config.dataset not in ["cifar10", "cifar100"]  
+    base_learning_rate = config.learning_rate * (config.batch_size / 256.)
+  else:
+    base_learning_rate = config.learning_rate
+    
   model_cls = getattr(models, config.model)
   model = create_model(
       model_cls=model_cls, half_precision=config.half_precision,
