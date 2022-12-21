@@ -20,11 +20,8 @@ import tensorflow as tf
 import tensorflow_datasets as tfds
 import augmentations
 from functools import partial
-
 IMAGE_SIZE = 224
 CROP_PADDING = 32
-MEAN_RGB = [0.485 * 255, 0.456 * 255, 0.406 * 255]
-STDDEV_RGB = [0.229 * 255, 0.224 * 255, 0.225 * 255]
 
 
 def distorted_bounding_box_crop(image_bytes,
@@ -128,31 +125,14 @@ def _decode_and_center_crop(image_bytes, image_size):
   return image
 
 
-def normalize_image(image):
+def normalize_image(image, mean, std):
   image = tf.cast(image, tf.float32)
-  image -= tf.constant(MEAN_RGB, shape=[1, 1, 3], dtype=image.dtype)
-  image /= tf.constant(STDDEV_RGB, shape=[1, 1, 3], dtype=image.dtype)
+  image -= tf.constant(mean, shape=[1, 1, 3], dtype=image.dtype)
+  image /= tf.constant(std, shape=[1, 1, 3], dtype=image.dtype)
   return image
 
 
-def preprocess_for_train(image_bytes, dtype=tf.float32, image_size=IMAGE_SIZE):
-  """Preprocesses the given image for training.
-  Args:
-    image_bytes: `Tensor` representing an image binary of arbitrary size.
-    dtype: data type of the image.
-    image_size: image size.
-  Returns:
-    A preprocessed image `Tensor`.
-  """
-  image = _decode_and_random_crop(image_bytes, image_size)
-  image = tf.reshape(image, [image_size, image_size, 3])
-  image = tf.image.random_flip_left_right(image)
-  image = normalize_image(image)
-  image = tf.image.convert_image_dtype(image, dtype=dtype)
-  return image
-
-
-def preprocess_for_eval(image_bytes, dtype=tf.float32, image_size=IMAGE_SIZE):
+def preprocess_for_eval(image_bytes, dtype=tf.float32, image_size=IMAGE_SIZE, config=None):
   """Preprocesses the given image for evaluation.
   Args:
     image_bytes: `Tensor` representing an image binary of arbitrary size.
@@ -161,24 +141,47 @@ def preprocess_for_eval(image_bytes, dtype=tf.float32, image_size=IMAGE_SIZE):
   Returns:
     A preprocessed image `Tensor`.
   """
-  image = _decode_and_center_crop(image_bytes, image_size)
+  if config.dataset not in ["cifar10", "cifar100"]:
+    image = _decode_and_center_crop(image_bytes, image_size)
+  else:
+    image = tf.image.decode_jpeg(image_bytes, 3)
+    
   image = tf.reshape(image, [image_size, image_size, 3])
-  image = normalize_image(image)
+  image = normalize_image(image, config.mean, config.std)
   image = tf.image.convert_image_dtype(image, dtype=dtype)
 
   return image
 
-def two_augmented_views(image_bytes, first_transform, second_transform, dtype=tf.float32, image_size=IMAGE_SIZE):
-    first = _decode_and_random_crop(image_bytes, image_size)
+def two_augmented_views(image_bytes, first_transform, second_transform, dtype=tf.float32, image_size=IMAGE_SIZE,
+                        config=None):
+    
+    if config.dataset not in ["cifar10", "cifar100"]:
+        first = _decode_and_random_crop(image_bytes, image_size)
+        if not config.same_crop:
+            second = _decode_and_random_crop(image_bytes, image_size) 
+        else:
+            second = first
+    
+    else:
+        first = tf.image.decode_jpeg(image_bytes, 3)
+        first = tf.image.random_crop(first, size=[28, 28, 3])
+        first = tf.image.resize_with_crop_or_pad(first, 32, 32)
+        if not config.same_crop:
+            second = tf.image.decode_jpeg(image_bytes, 3)
+            second = tf.image.random_crop(second, size=[28, 28, 3])
+            second = tf.image.resize_with_crop_or_pad(second, 32, 32)
+        else:
+            second = first
+
     first = tf.reshape(first, [image_size, image_size, 3])
+    second = tf.reshape(second, [image_size, image_size, 3])    
+    
     first = first_transform(tf.cast(first, tf.uint8))
-    first = normalize_image(first)
+    first = normalize_image(first, config.mean, config.std)
     first = tf.image.convert_image_dtype(first, dtype)
 
-    second = _decode_and_random_crop(image_bytes, image_size)
-    second = tf.reshape(second, [image_size, image_size, 3])        
     second = second_transform(tf.cast(second, tf.uint8))
-    second = normalize_image(second)
+    second = normalize_image(second, config.mean, config.std)
     second = tf.image.convert_image_dtype(second, dtype)
     
     return first, second
@@ -218,27 +221,31 @@ def create_split(dataset_builder, batch_size, train, dtype=tf.float32,
   Returns:
     A `tf.data.Dataset`.
   """
+    
   if train:
     train_examples = dataset_builder.info.splits['train'].num_examples
     split_size = train_examples // jax.process_count()
     start = jax.process_index() * split_size
     split = f'train[{start}:{start + split_size}]'
   else:
-    validate_examples = dataset_builder.info.splits['validation'].num_examples
+    dataset_key = 'validation' if config.dataset not in ['cifar10', 'cifar100'] else 'test'
+    validate_examples = dataset_builder.info.splits[dataset_key].num_examples
     split_size = validate_examples // jax.process_count()
     start = jax.process_index() * split_size
-    split = f'validation[{start}:{start + split_size}]'
+    split = dataset_key + f'[{start}:{start + split_size}]'
 
   first_transform = _solve_transform(config.first_transform)
   second_transform = _solve_transform(config.second_transform)
   
-  train_transform = partial(two_augmented_views, first_transform=first_transform, second_transform=second_transform)
+  train_transform = partial(two_augmented_views, first_transform=first_transform, second_transform=second_transform,
+                            dtype=dtype, image_size=config.image_size, config=config)
   def decode_example(example):
     if train:
-      image1, image2 = train_transform(example['image'], dtype=dtype, image_size=image_size)
+      image1, image2 = train_transform(example['image'], dtype=dtype, 
+                                       image_size=config.image_size)
       return {"image1" : image1, "image2" : image2, "label" : example["label"]}
     else:
-      image = preprocess_for_eval(example['image'], dtype, image_size)
+      image = preprocess_for_eval(example['image'], dtype, config.image_size, config=config)
       return {'image': image, 'label': example['label']}
 
   ds = dataset_builder.as_dataset(split=split, decoders={

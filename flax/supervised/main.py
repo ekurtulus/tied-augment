@@ -41,6 +41,16 @@ flags.DEFINE_string('workdir', None, 'Directory to store model data.')
 flags.DEFINE_string('model', 'ResNet50', 'model name')
 flags.DEFINE_string('dataset', 'imagenet2012', 'dataset name')
 
+flags.DEFINE_integer('image_size', -1, 'image_size')
+flags.DEFINE_multi_float('mean', [-1, -1, -1], 'mean of the dataset (optional)')
+flags.DEFINE_multi_float('std', [-1, -1, -1], 'mean of the dataset (optional)')
+flags.DEFINE_integer('num_classes', -1, 'number of classes in dataset (optional')
+
+flags.DEFINE_boolean('same_crop', False, 'whether to use the same crop for two branches')
+
+flags.DEFINE_string('lr_schedule', 'cosine', 'learning rate schedule')
+flags.DEFINE_string('tw_schedule', 'constant', 'learning rate schedule')
+
 flags.DEFINE_float('learning_rate', 0.1, 'learning rate')
 flags.DEFINE_float('warmup_epochs', 0.0, 'warmup epochs')
 flags.DEFINE_float('momentum', 0.9, 'SGD momentum')
@@ -59,17 +69,18 @@ flags.DEFINE_integer('steps_per_eval', -1, 'steps per eval')
 
 flags.DEFINE_boolean('both_branches_supervised', False, 'whether to apply CE to both left and right branches')
 flags.DEFINE_float('similarity_weight', 1.0, 'weight of the cosine term')
-flags.DEFINE_string('loss_type', 'cosine', 'similarity loss type')
+flags.DEFINE_string('loss_type', 'l2', 'similarity loss type')
     
 flags.DEFINE_boolean('single_forward', False, 'whether single forward pass is done instead of 2 forward passes')
     
-    
-flags.DEFINE_string('first_transform', './transforms/hflip_randaug_n2_m9.pkl', 'augmentation for the left branch')
-flags.DEFINE_string('second_transform', './transforms/hflip.pkl', 'augmentation for the right branch') 
+flags.DEFINE_string('first_transform', 'hflip_randaug_n2_m14', 'augmentation for the left branch')
+flags.DEFINE_string('second_transform', 'hflip_randaug_n2_m14', 'augmentation for the right branch') 
 
-flags.DEFINE_float('rho', 0, '')
+flags.DEFINE_float('rho', 0, 'SAM rho (if 0, SAM is not applied)')
 flags.DEFINE_string('sam_first_step', 'ce-similarity', 'first step of sam')
 flags.DEFINE_string('sam_second_step', 'ce-similarity', 'second step of sam')
+
+flags.DEFINE_float('mixup_alpha', 0.0, 'mixup alpha (if 0, no mixup is applied')
 
 def main(argv):
   if len(argv) > 1:

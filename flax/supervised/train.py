@@ -44,10 +44,8 @@ import input_pipeline
 import models
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-NUM_CLASSES = 1000
 
-
-def create_model(*, model_cls, half_precision, **kwargs):
+def create_model(*, model_cls, half_precision, num_classes, **kwargs):
   platform = jax.local_devices()[0].platform
   if half_precision:
     if platform == 'tpu':
@@ -56,7 +54,7 @@ def create_model(*, model_cls, half_precision, **kwargs):
       model_dtype = jnp.float16
   else:
     model_dtype = jnp.float32
-  return model_cls(num_classes=NUM_CLASSES, dtype=model_dtype, **kwargs)
+  return model_cls(num_classes=num_classes, dtype=model_dtype, **kwargs)
 
 
 def initialized(key, image_size, model):
@@ -81,10 +79,11 @@ def l2_normalized(first_features, second_features):
 def cosine_similarity(first_features, second_features):
     return jnp.mean(optax.cosine_similarity(first_features, second_features))
 
-def cross_entropy_double(first_probs, second_probs, labels, both_branches_supervised=False):
-    ce = cross_entropy_loss(first_probs, labels)
+def cross_entropy_double(first_probs, second_probs, first_labels, 
+                         second_labels, both_branches_supervised=False):
+    ce = cross_entropy_loss(first_probs, first_labels)
     if both_branches_supervised:
-        ce = (ce + cross_entropy_loss(second_probs, labels) ) / 2
+        ce = (ce + cross_entropy_loss(second_probs, second_labels) ) / 2
     return ce    
 
 def cross_entropy_loss(probs, labels, dtype=jnp.float32):
@@ -98,10 +97,10 @@ def cross_entropy_loss(probs, labels, dtype=jnp.float32):
     return -jnp.mean(jnp.sum(probs * labels, axis=-1))
 
 
-@partial(jax.jit, static_argnums=(5,6,7,8,9))
-def criterion(first_logits, second_logits, first_features, second_features, labels, 
-              both_branches_supervised=False, similarity_weight=1.0, cross_entropy=True,
-              similarity=True, loss_type="cosine"):
+@partial(jax.jit, static_argnums=(7,8,9,10))
+def criterion(first_logits, second_logits, first_features, second_features, first_labels,
+              second_labels, similarity_weight=1.0, both_branches_supervised=False, 
+              cross_entropy=True, similarity=True, loss_type="cosine"):
     
     if loss_type == "cosine":
         similarity_fn = cosine_similarity
@@ -112,21 +111,18 @@ def criterion(first_logits, second_logits, first_features, second_features, labe
     elif loss_type == "l2_normalized":
         similarity_fn = l2_normalized
     
-    num_classes = first_logits.shape[-1]
-    labels = jax.nn.one_hot(labels, num_classes, dtype=jnp.float32)
-    
     first_probs = jax.nn.log_softmax(first_logits.astype(jnp.float32))
     second_probs = jax.nn.log_softmax(second_logits.astype(jnp.float32))
     
     if not similarity and cross_entropy:
-        return cross_entropy_double(first_probs, second_probs, labels, 
+        return cross_entropy_double(first_probs, second_probs, first_labels, second_labels, 
                                     both_branches_supervised=both_branches_supervised)
     
     elif similarity and not cross_entropy:
         return similarity_fn(first_features, second_features)
     
     else:
-        return cross_entropy_double(first_probs, second_probs, labels, 
+        return cross_entropy_double(first_probs, second_probs, first_labels, second_labels,
                                     both_branches_supervised=both_branches_supervised) - similarity_weight * similarity_fn(first_features, second_features)
 
     
@@ -137,7 +133,8 @@ def acc_topk(logits, labels, topk=(1,5)):
 
 def compute_metrics(first_logits, first_features, second_logits, second_features, labels):
 
-  loss = cross_entropy_loss(jax.nn.log_softmax(first_logits.astype(jnp.float32)), jax.nn.one_hot(labels, NUM_CLASSES, dtype=jnp.float32))  
+  loss = cross_entropy_loss(jax.nn.log_softmax(first_logits.astype(jnp.float32)), 
+                            jax.nn.one_hot(labels, first_logits.shape[-1], dtype=jnp.float32))  
   
   top_1, top_5 = acc_topk(first_logits, labels)
     
@@ -154,28 +151,66 @@ def compute_metrics(first_logits, first_features, second_logits, second_features
 
 
 def create_learning_rate_fn(
+    schedule,
     config,
     base_learning_rate: float,
     steps_per_epoch: int):
   """Create learning rate schedule."""
+  warmup_epochs = config.warmup_epochs
+  num_epochs = max(config.num_epochs - config.warmup_epochs, 1)
+  
+  if schedule == "constant":
+    def schedule(count):
+      return base_learning_rate
+    scheduler = schedule 
+
+  elif schedule == "cosine":
+    scheduler = optax.cosine_decay_schedule(
+        init_value=base_learning_rate,
+        decay_steps=num_epochs * steps_per_epoch)
+  
+  elif schedule ==  "linear_up":
+    scheduler = optax.linear_schedule(
+            init_value=0,
+            end_value=base_learning_rate,
+            transition_steps=num_epochs * steps_per_epoch,
+        )
+
+  elif schedule ==  "linear_down":
+    scheduler = optax.linear_schedule(
+            init_value=base_learning_rate,
+            end_value=0,
+            transition_steps=num_epochs * steps_per_epoch,
+        )
+
+  elif schedule == "negate_odd":
+    def schedule(count):
+      if count % 2 == 0:
+        return base_learning_rate
+      else:
+        return -base_learning_rate
+    scheduler = schedule 
+  elif schedule == "negate_even":
+    def schedule(count):
+      if count % 2 == 0:
+        return -base_learning_rate
+      else:
+        return base_learning_rate
+    scheduler = schedule 
+  else:
+    raise ValueError("unknown scheduler : ", schedule)
+
   if config.warmup_epochs > 0:
-    print("Using warmup ! ")
     warmup_fn = optax.linear_schedule(
         init_value=0., end_value=base_learning_rate,
         transition_steps=config.warmup_epochs * steps_per_epoch)
-    cosine_epochs = max(config.num_epochs - config.warmup_epochs, 1)
-    cosine_fn = optax.cosine_decay_schedule(
-        init_value=base_learning_rate,
-        decay_steps=cosine_epochs * steps_per_epoch)
+
     schedule_fn = optax.join_schedules(
-        schedules=[warmup_fn, cosine_fn],
-        boundaries=[config.warmup_epochs * steps_per_epoch])
+        schedules=[warmup_fn, scheduler],
+        boundaries=[warmup_epochs * steps_per_epoch])
     return schedule_fn
-  else:
-    print("Directly starting with cosine ! ")
-    return  optax.cosine_decay_schedule(
-        init_value=base_learning_rate,
-        decay_steps=config.num_epochs * steps_per_epoch)
+  return scheduler
+
 
 def dual_vector(y: jnp.ndarray) -> jnp.ndarray:
   """Returns the solution of max_x y^T x s.t. ||x||_2 <= 1.
@@ -187,33 +222,42 @@ def dual_vector(y: jnp.ndarray) -> jnp.ndarray:
   normalized_gradient = jax.tree_map(lambda x: x / gradient_norm, y)
   return normalized_gradient
 
+def mixup(key, alpha, images, labels):
+  lam = jax.random.beta(key, alpha, alpha)
+  mixed_images = lam * images + (1. - lam) * images[::-1]
+  mixed_labels = lam * labels + (1. - lam) * labels[::-1]
 
-def train_step(state, batch, learning_rate_fn, config):
+  return mixed_images, mixed_labels, lam
+
+def train_step(state, batch, key, learning_rate_fn, config, tw=-1):
+  first_images, second_images = batch["image1"], batch["image2"]
+  first_labels, second_labels = (jax.nn.one_hot(batch["label"], config.num_classes, dtype=jnp.float32), 
+                                  jax.nn.one_hot(batch["label"], config.num_classes, dtype=jnp.float32))
+      
+  if config.mixup_alpha > 0:
+    first_images, first_labels, lam = mixup(key, config.mixup_alpha, first_images, first_labels)  
+
   """Perform a single training step."""
   def loss_fn(params, cross_entropy=True, similarity=True, loss_type="cosine"):
-    if "SBN" not in config.model and not config.single_forward:
-      """loss function used for training."""
-      (first_features, first_logits), new_model_state = state.apply_fn(
+    """loss function used for training."""      
+        
+    (first_features, first_logits), new_model_state = state.apply_fn(
           {'params': params, 'batch_stats': state.batch_stats},
-          batch['image1'],
+          first_images,
           mutable=['batch_stats'])
       
-      (second_features, second_logits), new_model_state = state.apply_fn(
+    (second_features, second_logits), new_model_state = state.apply_fn(
           {'params': params, 'batch_stats': new_model_state["batch_stats"]},
-          batch['image2'],
+          second_images,
           mutable=['batch_stats'])
-    else:
-      images = jnp.concatenate((batch["image1"], batch["image2"]), axis=0)
-      (features, logits), new_model_state = state.apply_fn(
-          {'params': params, 'batch_stats': state.batch_stats},
-          images,
-          mutable=['batch_stats'])
-      first_features, second_features = jnp.split(features , 2)
-      first_logits, second_logits = jnp.split(logits , 2)
-        
-    loss = criterion(first_logits, second_logits, first_features, second_features, batch['label'], 
-                     both_branches_supervised=config.both_branches_supervised, similarity_weight=config.similarity_weight,
-                     cross_entropy=cross_entropy, similarity=similarity, loss_type=loss_type)
+    
+    if config.mixup_alpha > 0:
+      second_features = lam * second_features + (1 - lam) * second_features[::-1]
+
+    loss = criterion(first_logits, second_logits, first_features, second_features, first_labels,
+                     second_labels, both_branches_supervised=config.both_branches_supervised, 
+                     similarity_weight=tw, cross_entropy=cross_entropy, similarity=similarity, 
+                     loss_type=loss_type)
     
     weight_penalty_params = jax.tree_util.tree_leaves(params)
     weight_l2 = sum(jnp.sum(x ** 2)
@@ -268,7 +312,6 @@ def train_step(state, batch, learning_rate_fn, config):
         grads = lax.pmean(grads, axis_name='batch')
         aux = aux[1]
         
-  print("aux length : ", len(aux), "\t", len(aux[1]),flush=True)
   new_model_state, first_logits, first_features, second_logits, second_features = aux
   metrics = compute_metrics(first_logits, first_features, second_logits, second_features, batch['label'])
   metrics['learning_rate'] = lr
@@ -319,8 +362,8 @@ def prepare_tf_data(xs):
 def create_input_iter(dataset_builder, batch_size, image_size, dtype, train,
                       cache, config):
   ds = input_pipeline.create_split(
-      dataset_builder, batch_size, image_size=image_size, dtype=dtype,
-      train=train, cache=cache, config=config)
+              dataset_builder, batch_size, train, image_size=image_size, dtype=dtype,
+              cache=cache, config=config)
   it = map(prepare_tf_data, ds)
   it = jax_utils.prefetch_to_device(it, 2)
   return it
@@ -394,8 +437,6 @@ def train_and_evaluate(config) -> TrainState:
 
   rng = random.PRNGKey(0)
 
-  image_size = 224
-
   if config.batch_size % jax.device_count() > 0:
     raise ValueError('Batch size must be divisible by the number of devices')
   local_batch_size = config.batch_size // jax.process_count()
@@ -410,13 +451,37 @@ def train_and_evaluate(config) -> TrainState:
   else:
     input_dtype = tf.float32
 
+  IMAGENET_MEAN = [0.485 * 255, 0.456 * 255, 0.406 * 255]
+  IMAGENET_STD = [0.229 * 255, 0.224 * 255, 0.225 * 255]
+    
+    
+  DATASETS = {
+    "imagenet2012" : {"num_classes" : 1000, "default_image_size" : 224, 
+                      "mean" : IMAGENET_MEAN, 
+                      "std" : IMAGENET_STD},
+    "cifar10" : {"num_classes" : 10, "default_image_size" : 32, 
+                 "mean" : [0.4914 * 255, 0.4822 * 255, 0.4465 * 255], 
+                 "std" : [0.2475 * 255, 0.2435 * 255, 0.2615 * 255]},
+      
+    "cifar100" : {"num_classes" : 100, "default_image_size" : 32, 
+                  "mean" : [0.5070 * 255, 0.4865 * 255, 0.4409 * 255], 
+                  "std" : [0.2673 * 255, 0.2564 * 255, 0.2761 * 255]},    
+  }
+  
+  dataset_config = DATASETS[config.dataset]
+  config.mean = dataset_config["mean"] if config.mean == [-1, -1, -1] else config.mean
+  config.std = dataset_config["std"]  if config.std == [-1, -1, -1] else config.std
+  config.num_classes = dataset_config["num_classes"] if config.num_classes == -1 else config.num_classes
+  config.image_size = dataset_config["default_image_size"] if config.image_size == -1 else config.image_size
+
   dataset_builder = tfds.builder(config.dataset)
+
   train_iter = create_input_iter(
-      dataset_builder, local_batch_size, image_size, input_dtype, train=True,
-      cache=config.cache, config=config)
+      dataset_builder, local_batch_size, config.image_size, input_dtype, True,
+          config.cache, config)
   eval_iter = create_input_iter(
-      dataset_builder, local_batch_size, image_size, input_dtype, train=False,
-      cache=config.cache, config=config)
+      dataset_builder, local_batch_size, config.image_size, input_dtype, False,
+          config.cache, config)
 
   steps_per_epoch = (
       dataset_builder.info.splits['train'].num_examples // config.batch_size
@@ -429,7 +494,7 @@ def train_and_evaluate(config) -> TrainState:
 
   if config.steps_per_eval == -1:
     num_validation_examples = dataset_builder.info.splits[
-        'validation'].num_examples
+        'validation' if config.dataset not in ['cifar10', 'cifar100'] else 'test'].num_examples
     steps_per_eval = num_validation_examples // config.batch_size
   else:
     steps_per_eval = config.steps_per_eval
@@ -440,12 +505,17 @@ def train_and_evaluate(config) -> TrainState:
 
   model_cls = getattr(models, config.model)
   model = create_model(
-      model_cls=model_cls, half_precision=config.half_precision)
+      model_cls=model_cls, half_precision=config.half_precision,
+      num_classes=config.num_classes)
 
-  learning_rate_fn = create_learning_rate_fn(
+  learning_rate_fn = create_learning_rate_fn(config.lr_schedule,
       config, base_learning_rate, steps_per_epoch)
+  
+  tw_scheduler = create_learning_rate_fn(config.tw_schedule, 
+                                         config,
+                                         config.similarity_weight, steps_per_epoch)
 
-  state = create_train_state(rng, config, model, image_size, learning_rate_fn)
+  state = create_train_state(rng, config, model, config.image_size, learning_rate_fn)
   state = restore_checkpoint(state, config.workdir)
   # step_offset > 0 if restarting from checkpoint
   step_offset = int(state.step)
@@ -463,7 +533,12 @@ def train_and_evaluate(config) -> TrainState:
   train_metrics_last_t = time.time()
   logging.info('Initial compilation, this might take some minutes...')
   for step, batch in zip(range(step_offset, num_steps), train_iter):
-    state, metrics = p_train_step(state, batch)
+    rng, key = random.split(rng)
+    key = jax_utils.replicate(key)
+    tw = tw_scheduler(step)
+    tw = jax_utils.replicate(tw)
+
+    state, metrics = p_train_step(state, batch, key=key, tw=tw)
     for h in hooks:
       h(step)
     if step == step_offset:
