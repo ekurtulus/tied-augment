@@ -138,7 +138,7 @@ def criterion(first_logits, second_logits, first_features, second_features, firs
         if logit_consistency_fn == "js_div":
             loss = loss + logit_consistency_weight * jensen_shannon(first_logits, second_logits)
         else:
-            loss = loss + logit_consistency_weight * cross_entropy_loss(first_probs, second_probs)    
+            loss = loss + logit_consistency_weight * cross_entropy_loss(first_probs, jax.lax.stop_gradient(second_probs))    
     
     return loss
 
