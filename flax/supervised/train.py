@@ -97,13 +97,6 @@ def cross_entropy_loss(probs, labels, dtype=jnp.float32):
     """
     return -jnp.mean(jnp.sum(probs * labels, axis=-1))
 
-def jensen_shannon(first_logits, second_logits):
-    first_softmax, second_softmax = jax.nn.softmax(first_logits), jax.nn.softmax(second_logits)
-    logp_mixture = jnp.log(jnp.clip(jnp.stack((first_softmax, second_softmax)).mean(0), 1e-7, 1))
-    first = (first_softmax * jnp.log(first_softmax / logp_mixture)).mean()
-    second = (second_softmax * jnp.log(second_softmax / logp_mixture)).mean()
-    return (first + second) / 2
-
 
 @partial(jax.jit, static_argnums=(7,8,9,10,11,12))
 def criterion(first_logits, second_logits, first_features, second_features, first_labels,
