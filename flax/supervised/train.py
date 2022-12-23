@@ -98,10 +98,10 @@ def cross_entropy_loss(probs, labels, dtype=jnp.float32):
     return -jnp.mean(jnp.sum(probs * labels, axis=-1))
 
 def jensen_shannon(first_logits, second_logits):
-    first_softmax, second_softmax = jnp.softmax(first_logits), jnp.softmax(second_logits)
-    logp_mixture = jnp.clip(jnp.stack((first_softmax, second_softmax)).mean(0), 1e-7, 1).log()
-    first = (first_softmax * (first_softmax / logp_mixture).log()).mean()
-    second = (second_softmax * (second_softmax / logp_mixture).log()).mean()
+    first_softmax, second_softmax = jax.nn.softmax(first_logits), jax.nn.softmax(second_logits)
+    logp_mixture = jnp.log(jnp.clip(jnp.stack((first_softmax, second_softmax)).mean(0), 1e-7, 1))
+    first = (first_softmax * jnp.log(first_softmax / logp_mixture)).mean()
+    second = (second_softmax * jnp.log(second_softmax / logp_mixture)).mean()
     return (first + second) / 2
 
 
@@ -124,25 +124,17 @@ def criterion(first_logits, second_logits, first_features, second_features, firs
     second_probs = jax.nn.log_softmax(second_logits.astype(jnp.float32))
     
     if not similarity and cross_entropy:
-        loss = cross_entropy_double(first_probs, second_probs, first_labels, second_labels, 
+        return cross_entropy_double(first_probs, second_probs, first_labels, second_labels, 
                                     both_branches_supervised=both_branches_supervised)
     
     elif similarity and not cross_entropy:
-        loss = similarity_fn(first_features, second_features)
+        return similarity_fn(first_features, second_features)
     
     else:
-        loss = cross_entropy_double(first_probs, second_probs, first_labels, second_labels,
-                                    both_branches_supervised=both_branches_supervised) - similarity_weight * similarity_fn(first_features, second_features)
+        return cross_entropy_double(first_probs, second_probs, first_labels, second_labels,
+                                    both_branches_supervised=both_branches_supervised) + similarity_weight * similarity_fn(first_features, second_features)
     
-    if logit_consistency_weight != 0:
-        if logit_consistency_fn == "js_div":
-            loss = loss + logit_consistency_weight * jensen_shannon(first_logits, second_logits)
-        else:
-            loss = loss + logit_consistency_weight * cross_entropy_loss(first_probs, jax.lax.stop_gradient(second_probs))    
-    
-    return loss
 
-    
 def acc_topk(logits, labels, topk=(1,5)):
     top = lax.top_k(logits, max(topk))[1].transpose()
     correct = top == labels.reshape(1, -1)
@@ -271,8 +263,8 @@ def train_step(state, batch, key, learning_rate_fn, config, tw=-1):
   def loss_fn(params, cross_entropy=True, similarity=True, loss_type="l2"):
     """loss function used for training."""      
     if "SBN" in config.model or config.single_forward:
-      images = jnp.cat((first_images, second_images))
-      (features, logits), new_model_state = state.apply(
+      images = jnp.concatenate((first_images, second_images))
+      (features, logits), new_model_state = state.apply_fn(
           {'params': params, 'batch_stats': state.batch_stats},
           images,
           mutable=['batch_stats'])
@@ -296,8 +288,7 @@ def train_step(state, batch, key, learning_rate_fn, config, tw=-1):
     loss = criterion(first_logits, second_logits, first_features, second_features, first_labels,
                      second_labels, both_branches_supervised=config.both_branches_supervised, 
                      similarity_weight=tw, cross_entropy=cross_entropy, similarity=similarity, 
-                     loss_type=loss_type, logit_consistency_weight=config.logit_consistency_weight,
-                     logit_consistency_fn=config.logit_consistency_fn)
+                     loss_type=loss_type)
 
     weight_penalty_params = jax.tree_util.tree_leaves(params)
     weight_l2 = sum(jnp.sum(x ** 2)

@@ -58,9 +58,6 @@ flags.DEFINE_float('momentum', 0.9, 'SGD momentum')
 flags.DEFINE_integer('batch_size', 128, 'local batch size')
 flags.DEFINE_float('weight_decay', 0.0001, 'weight decay')
 
-flags.DEFINE_float('logit_consistency_weight', 0, 'logit consistency weight')
-flags.DEFINE_string('logit_consistency_fn', 'js_div', 'logit consistency function (ce or js_div)')
-
 flags.DEFINE_float('num_epochs', 180.0, 'number of epochs')
 flags.DEFINE_integer('log_every_steps', 100, 'log every steps')
 flags.DEFINE_boolean('cache', False, 'cache the dataset')
