@@ -179,6 +179,7 @@ class WideResNet(nn.Module):
     num_classes: int
     depth: Tuple[int]
     width: int
+    split_batchnorm : bool
     norm: ModuleDef = nn.BatchNorm
     dtype: Any = jnp.float32
 
@@ -191,6 +192,10 @@ class WideResNet(nn.Module):
                     momentum=0.9,
                     epsilon=1e-5,
                     dtype=self.dtype)
+        
+        if self.split_batchnorm:
+            norm = partial(SplitBN, first_bn=norm, second_bn=norm, train=train)
+            print("using split BN ! ")
 
         widths = [int(v * self.width) for v in [16 * (2 ** i) for i in range(len(blocks_per_group))]]
         n = 16
@@ -224,15 +229,6 @@ ResNet152 = partial(ResNet, stage_sizes=[3, 8, 36, 3],
 ResNet200 = partial(ResNet, stage_sizes=[3, 24, 36, 3],
                     block_cls=BottleneckResNetBlock, split_batchnorm=False)
 
-WRN28_2 = partial(WideResNet, depth=28, width=2)
-WRN28_8 = partial(WideResNet, depth=28, width=8)
-WRN28_10 = partial(WideResNet, depth=28, width=10)
-WRN37_2 = partial(WideResNet, depth=37, width=2)
-WRN37_10 = partial(WideResNet, depth=37, width=10)
-WRN40_2 = partial(WideResNet, depth=40, width=2)
-WRN40_10 = partial(WideResNet, depth=40, width=10)
-
-"""
 ResNet18_SBN = partial(ResNet, stage_sizes=[2, 2, 2, 2],
                    block_cls=ResNetBlock, split_batchnorm=True)
 ResNet34_SBN = partial(ResNet, stage_sizes=[3, 4, 6, 3],
@@ -248,7 +244,23 @@ ResNet200_SBN = partial(ResNet, stage_sizes=[3, 24, 36, 3],
 
 ResNet18Local = partial(ResNet, stage_sizes=[2, 2, 2, 2],
                         block_cls=ResNetBlock, conv=nn.ConvLocal)
-"""
+
+
+WRN28_2 = partial(WideResNet, depth=28, width=2, split_batchnorm=False)
+WRN28_8 = partial(WideResNet, depth=28, width=8, split_batchnorm=False)
+WRN28_10 = partial(WideResNet, depth=28, width=10, split_batchnorm=False)
+WRN37_2 = partial(WideResNet, depth=37, width=2, split_batchnorm=False)
+WRN37_10 = partial(WideResNet, depth=37, width=10, split_batchnorm=False)
+WRN40_2 = partial(WideResNet, depth=40, width=2, split_batchnorm=False)
+WRN40_10 = partial(WideResNet, depth=40, width=10, split_batchnorm=False)
+
+WRN28_2_SBN = partial(WideResNet, depth=28, width=2, split_batchnorm=True)
+WRN28_8_SBN = partial(WideResNet, depth=28, width=8, split_batchnorm=True)
+WRN28_10_SBN = partial(WideResNet, depth=28, width=10, split_batchnorm=True)
+WRN37_2_SBN = partial(WideResNet, depth=37, width=2, split_batchnorm=True)
+WRN37_10_SBN = partial(WideResNet, depth=37, width=10, split_batchnorm=True)
+WRN40_2_SBN = partial(WideResNet, depth=40, width=2, split_batchnorm=True)
+WRN40_10_SBN = partial(WideResNet, depth=40, width=10, split_batchnorm=True)
 
 # Used for testing only.
 _ResNet1 = partial(ResNet, stage_sizes=[1], block_cls=ResNetBlock)

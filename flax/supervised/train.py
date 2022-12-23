@@ -42,6 +42,7 @@ import tensorflow_datasets as tfds
 from functools import partial
 import input_pipeline
 import models
+import warnings
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 
@@ -96,11 +97,19 @@ def cross_entropy_loss(probs, labels, dtype=jnp.float32):
     """
     return -jnp.mean(jnp.sum(probs * labels, axis=-1))
 
+def jensen_shannon(first_logits, second_logits):
+    first_softmax, second_softmax = jnp.softmax(first_logits), jnp.softmax(second_logits)
+    logp_mixture = jnp.clip(jnp.stack((first_softmax, second_softmax)).mean(0), 1e-7, 1).log()
+    first = (first_softmax * (first_softmax / logp_mixture).log()).mean()
+    second = (second_softmax * (second_softmax / logp_mixture).log()).mean()
+    return (first + second) / 2
 
-@partial(jax.jit, static_argnums=(7,8,9,10))
+
+@partial(jax.jit, static_argnums=(7,8,9,10,11,12))
 def criterion(first_logits, second_logits, first_features, second_features, first_labels,
               second_labels, similarity_weight=1.0, both_branches_supervised=False, 
-              cross_entropy=True, similarity=True, loss_type="cosine"):
+              cross_entropy=True, similarity=True, loss_type="l2", logit_consistency_weight=0.0,
+              logit_consistency_fn="js_div"):
     
     if loss_type == "cosine":
         similarity_fn = cosine_similarity
@@ -115,15 +124,23 @@ def criterion(first_logits, second_logits, first_features, second_features, firs
     second_probs = jax.nn.log_softmax(second_logits.astype(jnp.float32))
     
     if not similarity and cross_entropy:
-        return cross_entropy_double(first_probs, second_probs, first_labels, second_labels, 
+        loss = cross_entropy_double(first_probs, second_probs, first_labels, second_labels, 
                                     both_branches_supervised=both_branches_supervised)
     
     elif similarity and not cross_entropy:
-        return similarity_fn(first_features, second_features)
+        loss = similarity_fn(first_features, second_features)
     
     else:
-        return cross_entropy_double(first_probs, second_probs, first_labels, second_labels,
+        loss = cross_entropy_double(first_probs, second_probs, first_labels, second_labels,
                                     both_branches_supervised=both_branches_supervised) - similarity_weight * similarity_fn(first_features, second_features)
+    
+    if logit_consistency_weight != 0:
+        if logit_consistency_fn == "js_div":
+            loss = loss + logit_consistency_weight * jensen_shannon(first_logits, second_logits)
+        else:
+            loss = loss + logit_consistency_weight * cross_entropy_loss(first_probs, second_probs)    
+    
+    return loss
 
     
 def acc_topk(logits, labels, topk=(1,5)):
@@ -251,16 +268,25 @@ def train_step(state, batch, key, learning_rate_fn, config, tw=-1):
     first_images, first_labels, lam = mixup(key, config.mixup_alpha, first_images, first_labels)  
 
   """Perform a single training step."""
-  def loss_fn(params, cross_entropy=True, similarity=True, loss_type="cosine"):
+  def loss_fn(params, cross_entropy=True, similarity=True, loss_type="l2"):
     """loss function used for training."""      
-        
-    (first_features, first_logits), new_model_state = state.apply_fn(
+    if "SBN" in config.model or config.single_forward:
+      images = jnp.cat((first_images, second_images))
+      (features, logits), new_model_state = state.apply(
+          {'params': params, 'batch_stats': state.batch_stats},
+          images,
+          mutable=['batch_stats'])
+      first_features, second_features = jnp.split(features , 2)
+      first_logits, second_logits = jnp.split(logits , 2)
+    else:    
+      (first_features, first_logits), new_model_state = state.apply_fn(
           {'params': params, 'batch_stats': state.batch_stats},
           first_images,
           mutable=['batch_stats'])
       
-    (second_features, second_logits), new_model_state = state.apply_fn(
-          {'params': params, 'batch_stats': new_model_state["batch_stats"]},
+      (second_features, second_logits), new_model_state = state.apply_fn(
+          {'params': params, 
+          'batch_stats': new_model_state["batch_stats"] if not config.no_second_step_bn_update else state.batch_stats},
           second_images,
           mutable=['batch_stats'])
     
@@ -270,8 +296,9 @@ def train_step(state, batch, key, learning_rate_fn, config, tw=-1):
     loss = criterion(first_logits, second_logits, first_features, second_features, first_labels,
                      second_labels, both_branches_supervised=config.both_branches_supervised, 
                      similarity_weight=tw, cross_entropy=cross_entropy, similarity=similarity, 
-                     loss_type=loss_type)
-    
+                     loss_type=loss_type, logit_consistency_weight=config.logit_consistency_weight,
+                     logit_consistency_fn=config.logit_consistency_fn)
+
     weight_penalty_params = jax.tree_util.tree_leaves(params)
     weight_l2 = sum(jnp.sum(x ** 2)
                      for x in weight_penalty_params
@@ -478,16 +505,24 @@ def train_and_evaluate(config) -> TrainState:
       
     "cifar100" : {"num_classes" : 100, "default_image_size" : 32, 
                   "mean" : [0.5070 * 255, 0.4865 * 255, 0.4409 * 255], 
-                  "std" : [0.2673 * 255, 0.2564 * 255, 0.2761 * 255]},    
+                  "std" : [0.2673 * 255, 0.2564 * 255, 0.2761 * 255]},
+    "svhn_cropped" : {"num_classes" : 10, "default_image_size" : 32, 
+                  "mean" : [0.4309 * 255, 0.4302 * 255, 0.4463 * 255], 
+                  "std" : [0.1975 * 255, 0.2002 * 255, 0.1981 * 255]},    
   }
-  
-  dataset_config = DATASETS[config.dataset]
+  if config.dataset in DATASETS:
+    dataset_config = DATASETS[config.dataset]
+  else:
+    warnings.warn("Given dataset is not recognized so setting the configuration to ImageNet")
+    dataset_config = DATASETS["imagenet2012"]
+
   config.mean = dataset_config["mean"] if config.mean == [-1, -1, -1] else config.mean
   config.std = dataset_config["std"]  if config.std == [-1, -1, -1] else config.std
   config.num_classes = dataset_config["num_classes"] if config.num_classes == -1 else config.num_classes
   config.image_size = dataset_config["default_image_size"] if config.image_size == -1 else config.image_size
-
+  
   dataset_builder = tfds.builder(config.dataset)
+  dataset_builder.download_and_prepare()
 
   train_iter = create_input_iter(
       dataset_builder, local_batch_size, config.image_size, input_dtype, True,
@@ -507,14 +542,14 @@ def train_and_evaluate(config) -> TrainState:
 
   if config.steps_per_eval == -1:
     num_validation_examples = dataset_builder.info.splits[
-        'validation' if config.dataset not in ['cifar10', 'cifar100'] else 'test'].num_examples
+        'validation' if config.dataset not in ["cifar10", "cifar100", "svhn_cropped"] else 'test'].num_examples
     steps_per_eval = num_validation_examples // config.batch_size
   else:
     steps_per_eval = config.steps_per_eval
 
   steps_per_checkpoint = steps_per_epoch * 10
   
-  if config.dataset not in ["cifar10", "cifar100"]  
+  if config.dataset not in ["cifar10", "cifar100", "svhn_cropped"]:
     base_learning_rate = config.learning_rate * (config.batch_size / 256.)
   else:
     base_learning_rate = config.learning_rate

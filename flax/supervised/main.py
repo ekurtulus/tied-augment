@@ -32,6 +32,7 @@ from ml_collections import config_flags
 import tensorflow as tf
 
 import train
+import warnings
 
 
 
@@ -58,6 +59,7 @@ flags.DEFINE_integer('batch_size', 128, 'local batch size')
 flags.DEFINE_float('weight_decay', 0.0001, 'weight decay')
 
 flags.DEFINE_float('logit_consistency_weight', 0, 'logit consistency weight')
+flags.DEFINE_string('logit_consistency_fn', 'js_div', 'logit consistency function (ce or js_div)')
 
 flags.DEFINE_float('num_epochs', 180.0, 'number of epochs')
 flags.DEFINE_integer('log_every_steps', 100, 'log every steps')
@@ -67,11 +69,12 @@ flags.DEFINE_boolean('half_precision', False, 'use half precision')
 flags.DEFINE_integer('num_train_steps', -1, 'num train steps')
 flags.DEFINE_integer('steps_per_eval', -1, 'steps per eval')
 
-flags.DEFINE_boolean('both_branches_supervised', False, 'whether to apply CE to both left and right branches')
+flags.DEFINE_boolean('both_branches_supervised', True, 'whether to apply CE to both left and right branches')
 flags.DEFINE_float('similarity_weight', 1.0, 'weight of the cosine term')
 flags.DEFINE_string('loss_type', 'l2', 'similarity loss type')
     
 flags.DEFINE_boolean('single_forward', False, 'whether single forward pass is done instead of 2 forward passes')
+flags.DEFINE_boolean('no_second_step_bn_update', False, 'whether single forward pass is done instead of 2 forward passes')
     
 flags.DEFINE_string('first_transform', 'hflip_randaug_n2_m14', 'augmentation for the left branch')
 flags.DEFINE_string('second_transform', 'hflip_randaug_n2_m14', 'augmentation for the right branch') 

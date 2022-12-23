@@ -141,7 +141,7 @@ def preprocess_for_eval(image_bytes, dtype=tf.float32, image_size=IMAGE_SIZE, co
   Returns:
     A preprocessed image `Tensor`.
   """
-  if config.dataset not in ["cifar10", "cifar100"]:
+  if config.dataset not in ["cifar10", "cifar100", "svhn_cropped"]:
     image = _decode_and_center_crop(image_bytes, image_size)
   else:
     image = tf.image.decode_jpeg(image_bytes, 3)
@@ -155,7 +155,7 @@ def preprocess_for_eval(image_bytes, dtype=tf.float32, image_size=IMAGE_SIZE, co
 def two_augmented_views(image_bytes, first_transform, second_transform, dtype=tf.float32, image_size=IMAGE_SIZE,
                         config=None):
     
-    if config.dataset not in ["cifar10", "cifar100"]:
+    if config.dataset not in ["cifar10", "cifar100", "svhn_cropped"]:
         first = _decode_and_random_crop(image_bytes, image_size)
         if not config.same_crop:
             second = _decode_and_random_crop(image_bytes, image_size) 
@@ -195,7 +195,7 @@ def _solve_transform(transform_name):
         elif transform.startswith("randaug"):
             _, num_layers, magnitude = transform.split("_")
             transforms.append(partial(augmentations.distort_image_with_randaugment, 
-                                      num_layers=int(num_layers[1]), magnitude=int(magnitude[1]) ) )
+                                      num_layers=int(num_layers[1:]), magnitude=int(magnitude[1:]) ) )
         
         elif transform.startswith("simclr"):
             _, magnitude = transform.split("_")
@@ -204,7 +204,7 @@ def _solve_transform(transform_name):
         elif transform.startswith("stacked_randaug"):
             _, _, num_layers, magnitude, s = transform.split("_")
             transforms.append(partial(augmentations.stacked_randaugment,
-                                      s=float(s), num_layers=int(num_layers[1]), magnitude=int(magnitude[1])) )
+                                      s=float(s), num_layers=int(num_layers[1:]), magnitude=int(magnitude[1:])) )
 
     return partial(augmentations.compose_transforms, augmentations=transforms)
     
@@ -228,7 +228,7 @@ def create_split(dataset_builder, batch_size, train, dtype=tf.float32,
     start = jax.process_index() * split_size
     split = f'train[{start}:{start + split_size}]'
   else:
-    dataset_key = 'validation' if config.dataset not in ['cifar10', 'cifar100'] else 'test'
+    dataset_key = 'validation' if config.dataset not in ['cifar10', 'cifar100', 'svhn_cropped'] else 'test'
     validate_examples = dataset_builder.info.splits[dataset_key].num_examples
     split_size = validate_examples // jax.process_count()
     start = jax.process_index() * split_size
