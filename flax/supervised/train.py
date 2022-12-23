@@ -98,11 +98,10 @@ def cross_entropy_loss(probs, labels, dtype=jnp.float32):
     return -jnp.mean(jnp.sum(probs * labels, axis=-1))
 
 
-@partial(jax.jit, static_argnums=(7,8,9,10,11,12))
+@partial(jax.jit, static_argnums=(7,8,9,10))
 def criterion(first_logits, second_logits, first_features, second_features, first_labels,
               second_labels, similarity_weight=1.0, both_branches_supervised=False, 
-              cross_entropy=True, similarity=True, loss_type="l2", logit_consistency_weight=0.0,
-              logit_consistency_fn="js_div"):
+              cross_entropy=True, similarity=True, loss_type="l2"):
     
     if loss_type == "cosine":
         similarity_fn = cosine_similarity
