@@ -20,6 +20,7 @@ import tensorflow as tf
 import tensorflow_datasets as tfds
 import augmentations
 from functools import partial
+import logging
 IMAGE_SIZE = 224
 CROP_PADDING = 32
 
@@ -193,18 +194,20 @@ def _solve_transform(transform_name):
         if transform == "hflip":
             transforms.append(tf.image.random_flip_left_right)
         elif transform.startswith("randaug"):
-            _, num_layers, magnitude = transform.split("_")
+            _, num_layers, magnitude, prob = transform.split("_")
             transforms.append(partial(augmentations.distort_image_with_randaugment, 
-                                      num_layers=int(num_layers[1:]), magnitude=int(magnitude[1:]) ) )
+                                      num_layers=int(num_layers[1:]), magnitude=int(magnitude[1:]),
+                                      probability=float(prob[1:]) ) )
         
         elif transform.startswith("simclr"):
             _, magnitude = transform.split("_")
             transforms.append( partial(augmentations.simclr, s=float(magnitude) ) )
         
         elif transform.startswith("stacked_randaug"):
-            _, _, num_layers, magnitude, s = transform.split("_")
+            _, _, num_layers, magnitude, s, prob = transform.split("_")
             transforms.append(partial(augmentations.stacked_randaugment,
-                                      s=float(s), num_layers=int(num_layers[1:]), magnitude=int(magnitude[1:])) )
+                                      s=float(s), num_layers=int(num_layers[1:]), magnitude=int(magnitude[1:]),
+                                      probability=float(prob[1:]) ))
 
     return partial(augmentations.compose_transforms, augmentations=transforms)
     
@@ -237,6 +240,9 @@ def create_split(dataset_builder, batch_size, train, dtype=tf.float32,
   first_transform = _solve_transform(config.first_transform)
   second_transform = _solve_transform(config.second_transform)
   
+  logging.info(" first transform : ", first_transform)
+  logging.info(" second transform : ", second_transform)
+
   train_transform = partial(two_augmented_views, first_transform=first_transform, second_transform=second_transform,
                             dtype=dtype, image_size=config.image_size, config=config)
   def decode_example(example):

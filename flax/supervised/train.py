@@ -356,7 +356,7 @@ def train_step(state, batch, key, learning_rate_fn, config, tw=-1):
         dynamic_scale=dynamic_scale)
     metrics['scale'] = dynamic_scale.scale
   
-  print("train step compiled ! ")
+  logging.info("train step compiled ! ")
   return new_state, metrics
 
 
@@ -364,7 +364,7 @@ def eval_step(state, batch):
   variables = {'params': state.params, 'batch_stats': state.batch_stats}
   features, logits = state.apply_fn(
       variables, batch['image'], train=False, mutable=False)
-  print("eval step compiled ! ")
+  logging.info("eval step compiled ! ")
   return compute_eval_metrics(logits, features, batch['label'])
 
 

@@ -73,8 +73,8 @@ flags.DEFINE_string('loss_type', 'l2', 'similarity loss type')
 flags.DEFINE_boolean('single_forward', False, 'whether single forward pass is done instead of 2 forward passes')
 flags.DEFINE_boolean('no_second_step_bn_update', False, 'whether single forward pass is done instead of 2 forward passes')
     
-flags.DEFINE_string('first_transform', 'hflip_randaug_n2_m14', 'augmentation for the left branch')
-flags.DEFINE_string('second_transform', 'hflip_randaug_n2_m14', 'augmentation for the right branch') 
+flags.DEFINE_string('first_transform', 'hflip-randaug_n2_m14_p1', 'augmentation for the left branch')
+flags.DEFINE_string('second_transform', 'hflip-randaug_n2_m14_p1', 'augmentation for the right branch') 
 
 flags.DEFINE_float('rho', 0, 'SAM rho (if 0, SAM is not applied)')
 flags.DEFINE_string('sam_first_step', 'ce-similarity', 'first step of sam')

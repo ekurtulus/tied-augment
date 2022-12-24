@@ -88,14 +88,14 @@ def blend(image1, image2, factor):
   if factor == 1.0:
     return tf.convert_to_tensor(image2)
 
-  image1 = tf.to_float(image1)
-  image2 = tf.to_float(image2)
+  image1 = tf.cast(image1, tf.float32)
+  image2 = tf.cast(image2, tf.float32)
 
   difference = image2 - image1
   scaled = factor * difference
 
   # Do addition in float.
-  temp = tf.to_float(image1) + scaled
+  temp = tf.cast(image1, tf.float32) + scaled
 
   # Interpolate
   if factor > 0.0 and factor < 1.0:
@@ -128,11 +128,11 @@ def cutout(image, pad_size, replace=0):
   image_width = tf.shape(image)[1]
 
   # Sample the center location in the image where the zero mask will be applied.
-  cutout_center_height = tf.random_uniform(
+  cutout_center_height = tf.random.uniform(
       shape=[], minval=0, maxval=image_height,
       dtype=tf.int32)
 
-  cutout_center_width = tf.random_uniform(
+  cutout_center_width = tf.random.uniform(
       shape=[], minval=0, maxval=image_width,
       dtype=tf.int32)
 
@@ -280,14 +280,14 @@ def autocontrast(image):
     # A possibly cheaper version can be done using cumsum/unique_with_counts
     # over the histogram values, rather than iterating over the entire image.
     # to compute mins and maxes.
-    lo = tf.to_float(tf.reduce_min(image))
-    hi = tf.to_float(tf.reduce_max(image))
+    lo = tf.cast(tf.reduce_min(image), tf.float32)
+    hi = tf.cast(tf.reduce_max(image), tf.float32)
 
     # Scale the image, making the lowest value 0 and the highest value 255.
     def scale_values(im):
       scale = 255.0 / (hi - lo)
       offset = -lo * scale
-      im = tf.to_float(im) * scale + offset
+      im = tf.cast(im, tf.float32) * scale + offset
       im = tf.clip_by_value(im, 0.0, 255.0)
       return tf.cast(im, tf.uint8)
 
@@ -445,7 +445,7 @@ NAME_TO_FUNC = {
 
 def _randomly_negate_tensor(tensor):
   """With 50% prob turn the tensor negative."""
-  should_flip = tf.cast(tf.floor(tf.random_uniform([]) + 0.5), tf.bool)
+  should_flip = tf.cast(tf.floor(tf.random.uniform([]) + 0.5), tf.bool)
   final_tensor = tf.cond(should_flip, lambda: tensor, lambda: -tensor)
   return final_tensor
 
@@ -543,7 +543,7 @@ def _apply_func_with_prob(func, image, args, prob):
 
   # Apply the function with probability `prob`.
   should_apply_op = tf.cast(
-      tf.floor(tf.random_uniform([], dtype=tf.float32) + prob), tf.bool)
+      tf.floor(tf.random.uniform([], dtype=tf.float32) + prob), tf.bool)
   augmented_image = tf.cond(
       should_apply_op,
       lambda: func(image, *args),
@@ -553,7 +553,7 @@ def _apply_func_with_prob(func, image, args, prob):
 
 def select_and_apply_random_policy(policies, image):
   """Select a random policy from `policies` and apply it to `image`."""
-  policy_to_select = tf.random_uniform([], maxval=len(policies), dtype=tf.int32)
+  policy_to_select = tf.random.uniform([], maxval=len(policies), dtype=tf.int32)
   # Note that using tf.case instead of tf.conds would result in significantly
   # larger graphs and would even break export for some larger policies.
   for (i, policy) in enumerate(policies):
@@ -639,7 +639,7 @@ def distort_image_with_autoaugment(image, augmentation_name):
   return build_and_apply_nas_policy(policy, image, augmentation_hparams)
 
 
-def distort_image_with_randaugment(image, num_layers, magnitude):
+def distort_image_with_randaugment(image, num_layers, magnitude, probability=1.0):
   """Applies the RandAugment policy to `image`.
   RandAugment is from the paper https://arxiv.org/abs/1909.13719,
   Args:
@@ -654,7 +654,6 @@ def distort_image_with_randaugment(image, num_layers, magnitude):
     The augmented version of `image`.
   """
   replace_value = [128] * 3
-  tf.logging.info('Using RandAug.')
   augmentation_hparams = HParams(
       cutout_const=40, translate_const=100)
   available_ops = [
@@ -663,16 +662,19 @@ def distort_image_with_randaugment(image, num_layers, magnitude):
       'ShearX', 'ShearY', 'TranslateX', 'TranslateY', 'Cutout', 'SolarizeAdd']
 
   for layer_num in range(num_layers):
-    op_to_select = tf.random_uniform(
+    op_to_select = tf.random.uniform(
         [], maxval=len(available_ops), dtype=tf.int32)
     random_magnitude = float(magnitude)
     with tf.name_scope('randaug_layer_{}'.format(layer_num)):
       for (i, op_name) in enumerate(available_ops):
-        prob = tf.random_uniform([], minval=0.2, maxval=0.8, dtype=tf.float32)
+        prob = tf.random.uniform([], minval=0.2, maxval=0.8, dtype=tf.float32)
+        should_apply_op = tf.cast(
+                                  tf.floor(tf.random.uniform([], dtype=tf.float32) + probability), tf.bool)
+
         func, _, args = _parse_policy_info(op_name, prob, random_magnitude,
                                            replace_value, augmentation_hparams)
         image = tf.cond(
-            tf.equal(i, op_to_select),
+            tf.math.logical_and(tf.equal(i, op_to_select), should_apply_op),
             lambda selected_func=func, selected_args=args: selected_func(
                 image, *selected_args),
             # pylint:enable=g-long-lambda
@@ -709,7 +711,7 @@ def simclr(image, s=1.0):
     image = _apply_func_with_prob(color_jitter, image, (), 0.8)
     
     should_apply_op = tf.cast(
-      tf.floor(tf.random_uniform([], dtype=tf.float32) + 0.5), tf.bool)
+      tf.floor(tf.random.uniform([], dtype=tf.float32) + 0.5), tf.bool)
     image = tf.cond(
       should_apply_op,
       lambda: blur(image, filter_shape=(22,22), sigma=float(tf.random.uniform([], minval=0.1, maxval=2)) ),
@@ -720,7 +722,7 @@ def simclr(image, s=1.0):
     return image
         
 
-def stacked_randaugment(image, s=1.0, num_layers=2, magnitude=9):
+def stacked_randaugment(image, s=1.0, num_layers=2, magnitude=9, probability=1.0):
     def color_jitter(x):
         # one can also shuffle the order of following augmentations
         # each time they are applied.
@@ -738,13 +740,13 @@ def stacked_randaugment(image, s=1.0, num_layers=2, magnitude=9):
     image = _apply_func_with_prob(color_jitter, image, (), 0.8)
     
     should_apply_op = tf.cast(
-      tf.floor(tf.random_uniform([], dtype=tf.float32) + 0.5), tf.bool)
+      tf.floor(tf.random.uniform([], dtype=tf.float32) + 0.5), tf.bool)
     image = tf.cond(
       should_apply_op,
       lambda: blur(image, filter_shape=(22,22), sigma=float(tf.random.uniform([], minval=0.1, maxval=2)) ),
       lambda: image)
     
-    image = distort_image_with_randaugment(image, num_layers=num_layers, magnitude=magnitude)
+    image = distort_image_with_randaugment(image, num_layers=num_layers, magnitude=magnitude, probability=probability)
 
     image = _apply_func_with_prob(color_drop, image, (), 0.2)            
 
