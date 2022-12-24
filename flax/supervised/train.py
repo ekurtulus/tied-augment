@@ -372,21 +372,21 @@ def train_step(state, batch, key, learning_rate_fn, config, tw=-1, dropout_key=N
         dynamic_scale=dynamic_scale)
     metrics['scale'] = dynamic_scale.scale
   
-  new_ema = state.ema.update(new_state.params) if state.ema is not None else None
+  new_ema = state.ema.update(new_state.params, new_state.batch_stats) if state.ema is not None else None
   new_state = new_state.replace(ema=new_ema)
   logging.info("train step compiled ! ")
   return new_state, metrics
 
 
 def eval_step(state, batch):
-  variables = {'params': state.params, 'batch_stats': state.batch_stats}
+  variables = {'params': state.params, 'batch_stats' : state.batch_stats}
   features, logits = state.apply_fn(
       variables, batch['image'], train=False, mutable=False)
   logging.info("eval step compiled ! ")
   return compute_eval_metrics(logits, features, batch['label'])
 
 def eval_step_ema(state, batch):
-  variables = {'params': state.ema.variables, 'batch_stats': state.batch_stats}
+  variables = {'params': state.ema.params, 'batch_stats' : state.ema.batch_stats}
   features, logits = state.apply_fn(
       variables, batch['image'], train=False, mutable=False)
   logging.info("eval step compiled ! ")
@@ -447,23 +447,28 @@ def sync_batch_stats(state):
 @struct.dataclass
 class EmaState:
     decay: float = struct.field(pytree_node=False, default=0.)
-    variables: flax.core.FrozenDict[str, Any] = None
+    params: flax.core.FrozenDict[str, Any] = None
+    batch_stats: flax.core.FrozenDict[str, Any] = None
 
     @staticmethod
-    def create(decay, variables):
+    def create(decay, params, batch_stats):
         """Initialize ema state"""
         if decay == 0.:
             # default state == disabled
             return EmaState()
-        ema_variables = jax.tree_map(lambda x: x, variables)
-        return EmaState(decay, ema_variables)
+        ema_params = jax.tree_map(lambda x: x, params)
+        ema_batch_stats = jax.tree_map(lambda x: x, batch_stats)
+        return EmaState(decay, ema_params, ema_batch_stats)
 
-    def update(self, new_variables):
+    def update(self, new_params, new_batch_stats):
         if self.decay == 0.:
             return self.replace(variables=None)
-        new_ema_variables = jax.tree_util.tree_map(
-            lambda ema, p: ema * self.decay + (1. - self.decay) * p, self.variables, new_variables)
-        return self.replace(variables=new_ema_variables)
+        new_ema_params = jax.tree_util.tree_map(
+            lambda ema, p: ema * self.decay + (1. - self.decay) * p, self.params, new_params)
+        new_ema_batch_stats = jax.tree_util.tree_map(
+            lambda ema, p: ema * self.decay + (1. - self.decay) * p, self.batch_stats, new_batch_stats)
+
+        return self.replace(params=new_ema_params, batch_stats=new_ema_batch_stats)
 
 @struct.dataclass
 class TrainStateExtended(TrainState):
@@ -491,7 +496,7 @@ def create_train_state(rng, config, model, image_size, learning_rate_fn):
       tx=tx,
       batch_stats=batch_stats,
       dynamic_scale=dynamic_scale,
-      ema=EmaState.create(config.ema_decay, params) if config.ema_decay != 0 else None)
+      ema=EmaState.create(config.ema_decay, params,  batch_stats) if config.ema_decay != 0 else None)
   return state
 
 
