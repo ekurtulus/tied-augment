@@ -422,7 +422,9 @@ def unwrap(image, replace):
   image = tf.slice(image, [0, 0, 0], [image_shape[0], image_shape[1], 3])
   return image
 
-
+def identity(image):
+    return image
+    
 NAME_TO_FUNC = {
     'AutoContrast': autocontrast,
     'Equalize': equalize,
@@ -440,6 +442,7 @@ NAME_TO_FUNC = {
     'TranslateX': translate_x,
     'TranslateY': translate_y,
     'Cutout': cutout,
+    'Identity': identity
 }
 
 
@@ -657,9 +660,9 @@ def distort_image_with_randaugment(image, num_layers, magnitude, probability=1.0
   augmentation_hparams = HParams(
       cutout_const=40, translate_const=100)
   available_ops = [
-      'AutoContrast', 'Equalize', 'Invert', 'Rotate', 'Posterize',
+      'AutoContrast', 'Equalize', 'Rotate', 'Posterize',
       'Solarize', 'Color', 'Contrast', 'Brightness', 'Sharpness',
-      'ShearX', 'ShearY', 'TranslateX', 'TranslateY', 'Cutout', 'SolarizeAdd']
+      'ShearX', 'ShearY', 'TranslateX', 'TranslateY', ]
 
   for layer_num in range(num_layers):
     op_to_select = tf.random.uniform(
@@ -686,9 +689,6 @@ def compose_transforms(image, augmentations=[]):
         image = i(image)
     return image
         
-def identity(image):
-    return image
-
 
 def simclr(image, s=1.0):
     # image is a tensor with value range in [0, 1].

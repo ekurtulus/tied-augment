@@ -1,4 +1,4 @@
-  # Copyright 2022 The Flax Authors.
+# Copyright 2022 The Flax Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -57,6 +57,8 @@ flags.DEFINE_float('warmup_epochs', 0.0, 'warmup epochs')
 flags.DEFINE_float('momentum', 0.9, 'SGD momentum')
 flags.DEFINE_integer('batch_size', 128, 'local batch size')
 flags.DEFINE_float('weight_decay', 0.0001, 'weight decay')
+flags.DEFINE_float('label_smoothing', 0, 'label smoothing factor')
+flags.DEFINE_float('ema_decay', 0, 'ema decay factor (ema is not applied if ema_decay is 0)')
 
 flags.DEFINE_float('num_epochs', 180.0, 'number of epochs')
 flags.DEFINE_integer('log_every_steps', 100, 'log every steps')

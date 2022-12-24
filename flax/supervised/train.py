@@ -44,8 +44,14 @@ import input_pipeline
 import models
 import warnings
 from typing import Any, Callable, Dict, List, Optional, Tuple
+import flax.serialization as serialization
+import flax.struct as struct
 
-
+"""
+TODO:
+- EMA
+- label smoothing
+"""
 def create_model(*, model_cls, half_precision, num_classes, **kwargs):
   platform = jax.local_devices()[0].platform
   if half_precision:
@@ -58,12 +64,12 @@ def create_model(*, model_cls, half_precision, num_classes, **kwargs):
   return model_cls(num_classes=num_classes, dtype=model_dtype, **kwargs)
 
 
-def initialized(key, image_size, model):
+def initialized(keys, image_size, model):
   input_shape = (2, image_size, image_size, 3)
   @jax.jit
   def init(*args):
     return model.init(*args)
-  variables = init({'params': key}, jnp.ones(input_shape, model.dtype))
+  variables = init({'params': keys[0], 'dropout' : keys[1]}, jnp.ones(input_shape, model.dtype))
   return variables['params'], variables['batch_stats']
  
 def l2_loss(first_features, second_features):
@@ -98,11 +104,17 @@ def cross_entropy_loss(probs, labels, dtype=jnp.float32):
     return -jnp.mean(jnp.sum(probs * labels, axis=-1))
 
 
-@partial(jax.jit, static_argnums=(7,8,9,10))
-def criterion(first_logits, second_logits, first_features, second_features, first_labels,
-              second_labels, similarity_weight=1.0, both_branches_supervised=False, 
-              cross_entropy=True, similarity=True, loss_type="l2"):
+@partial(jax.jit, static_argnums=(7,8,9,10,11))
+def criterion(first_logits, second_logits, first_features, second_features, 
+              first_labels, second_labels, similarity_weight=1.0, label_smoothing=0.0, 
+              both_branches_supervised=False, cross_entropy=True, similarity=True, loss_type="l2"):
     
+    num_classes = first_logits.shape[-1]
+    
+    if label_smoothing > 0:
+        first_labels = first_labels * (1 - label_smoothing) + label_smoothing / num_classes
+        second_labels = second_labels * (1 - label_smoothing) + label_smoothing / num_classes
+
     if loss_type == "cosine":
         similarity_fn = cosine_similarity
     elif loss_type == "l1":
@@ -243,7 +255,8 @@ def mixup(key, alpha, images, labels):
 
   return mixed_images, mixed_labels, lam
 
-def train_step(state, batch, key, learning_rate_fn, config, tw=-1):
+def train_step(state, batch, key, learning_rate_fn, config, tw=-1, dropout_key=None):
+  dropout_key = jax.random.fold_in(dropout_key, state.step)
   first_images, second_images = batch["image1"], batch["image2"]
   first_labels, second_labels = (jax.nn.one_hot(batch["label"], config.num_classes, dtype=jnp.float32), 
                                   jax.nn.one_hot(batch["label"], config.num_classes, dtype=jnp.float32))
@@ -259,20 +272,23 @@ def train_step(state, batch, key, learning_rate_fn, config, tw=-1):
       (features, logits), new_model_state = state.apply_fn(
           {'params': params, 'batch_stats': state.batch_stats},
           images,
-          mutable=['batch_stats'])
+          mutable=['batch_stats'], 
+          rngs={"dropout" : dropout_key})
       first_features, second_features = jnp.split(features , 2)
       first_logits, second_logits = jnp.split(logits , 2)
     else:    
       (first_features, first_logits), new_model_state = state.apply_fn(
           {'params': params, 'batch_stats': state.batch_stats},
           first_images,
-          mutable=['batch_stats'])
+          mutable=['batch_stats'], 
+          rngs={"dropout" : dropout_key})
       
       (second_features, second_logits), new_model_state = state.apply_fn(
           {'params': params, 
           'batch_stats': new_model_state["batch_stats"] if not config.no_second_step_bn_update else state.batch_stats},
           second_images,
-          mutable=['batch_stats'])
+          mutable=['batch_stats'], 
+          rngs={"dropout" : dropout_key})
     
     if config.mixup_alpha > 0:
       second_features = lam * second_features + (1 - lam) * second_features[::-1]
@@ -280,7 +296,7 @@ def train_step(state, batch, key, learning_rate_fn, config, tw=-1):
     loss = criterion(first_logits, second_logits, first_features, second_features, first_labels,
                      second_labels, both_branches_supervised=config.both_branches_supervised, 
                      similarity_weight=tw, cross_entropy=cross_entropy, similarity=similarity, 
-                     loss_type=loss_type)
+                     loss_type=loss_type, label_smoothing=config.label_smoothing)
 
     weight_penalty_params = jax.tree_util.tree_leaves(params)
     weight_l2 = sum(jnp.sum(x ** 2)
@@ -356,6 +372,8 @@ def train_step(state, batch, key, learning_rate_fn, config, tw=-1):
         dynamic_scale=dynamic_scale)
     metrics['scale'] = dynamic_scale.scale
   
+  new_ema = state.ema.update(new_state.params) if state.ema is not None else None
+  new_state = new_state.replace(ema=new_ema)
   logging.info("train step compiled ! ")
   return new_state, metrics
 
@@ -367,6 +385,12 @@ def eval_step(state, batch):
   logging.info("eval step compiled ! ")
   return compute_eval_metrics(logits, features, batch['label'])
 
+def eval_step_ema(state, batch):
+  variables = {'params': state.ema.variables, 'batch_stats': state.batch_stats}
+  features, logits = state.apply_fn(
+      variables, batch['image'], train=False, mutable=False)
+  logging.info("eval step compiled ! ")
+  return compute_eval_metrics(logits, features, batch['label'])  
 
 def prepare_tf_data(xs):
   """Convert a input batch from tf Tensors to numpy arrays."""
@@ -420,6 +444,30 @@ def sync_batch_stats(state):
   # we sync them before evaluation.
   return state.replace(batch_stats=cross_replica_mean(state.batch_stats))
 
+@struct.dataclass
+class EmaState:
+    decay: float = struct.field(pytree_node=False, default=0.)
+    variables: flax.core.FrozenDict[str, Any] = None
+
+    @staticmethod
+    def create(decay, variables):
+        """Initialize ema state"""
+        if decay == 0.:
+            # default state == disabled
+            return EmaState()
+        ema_variables = jax.tree_map(lambda x: x, variables)
+        return EmaState(decay, ema_variables)
+
+    def update(self, new_variables):
+        if self.decay == 0.:
+            return self.replace(variables=None)
+        new_ema_variables = jax.tree_util.tree_map(
+            lambda ema, p: ema * self.decay + (1. - self.decay) * p, self.variables, new_variables)
+        return self.replace(variables=new_ema_variables)
+
+@struct.dataclass
+class TrainStateExtended(TrainState):
+  ema: Any
 
 def create_train_state(rng, config, model, image_size, learning_rate_fn):
 
@@ -437,12 +485,13 @@ def create_train_state(rng, config, model, image_size, learning_rate_fn):
       momentum=config.momentum,
       nesterov=True,
   )
-  state = TrainState.create(
+  state = TrainStateExtended.create(
       apply_fn=model.apply,
       params=params,
       tx=tx,
       batch_stats=batch_stats,
-      dynamic_scale=dynamic_scale)
+      dynamic_scale=dynamic_scale,
+      ema=EmaState.create(config.ema_decay, params) if config.ema_decay != 0 else None)
   return state
 
 
@@ -548,8 +597,11 @@ def train_and_evaluate(config) -> TrainState:
   tw_scheduler = create_learning_rate_fn(config.tw_schedule, 
                                          config,
                                          config.similarity_weight, steps_per_epoch)
+  params_rng, dropout_rng = jax.random.split(rng)
+  for i in range(5):
+    rng, key = jax.random.split(rng)
 
-  state = create_train_state(rng, config, model, config.image_size, learning_rate_fn)
+  state = create_train_state((params_rng, dropout_rng), config, model, config.image_size, learning_rate_fn)
   state = restore_checkpoint(state, config.workdir)
   # step_offset > 0 if restarting from checkpoint
   step_offset = int(state.step)
@@ -558,7 +610,7 @@ def train_and_evaluate(config) -> TrainState:
   p_train_step = jax.pmap(
       functools.partial(train_step, learning_rate_fn=learning_rate_fn, config=config),
       axis_name='batch')
-  p_eval_step = jax.pmap(eval_step, axis_name='batch')
+  p_eval_step = jax.pmap(eval_step, axis_name='batch') if config.ema_decay == 0 else jax.pmap(eval_step_ema, axis_name="batch")
 
   train_metrics = []
   hooks = []
@@ -567,12 +619,15 @@ def train_and_evaluate(config) -> TrainState:
   train_metrics_last_t = time.time()
   logging.info('Initial compilation, this might take some minutes...')
   for step, batch in zip(range(step_offset, num_steps), train_iter):
-    rng, key = random.split(rng)
-    key = jax_utils.replicate(key)
+    rng, mixup_key = random.split(rng)
+    mixup_key = jax_utils.replicate(mixup_key)
+    dropout_rng = common_utils.shard_prng_key(rng)
+    
     tw = tw_scheduler(step)
     tw = jax_utils.replicate(tw)
 
-    state, metrics = p_train_step(state, batch, key=key, tw=tw)
+    state, metrics = p_train_step(state, batch, key=mixup_key, tw=tw, 
+                                  dropout_key=dropout_rng)
     for h in hooks:
       h(step)
     if step == step_offset:

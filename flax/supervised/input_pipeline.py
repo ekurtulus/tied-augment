@@ -153,8 +153,8 @@ def preprocess_for_eval(image_bytes, dtype=tf.float32, image_size=IMAGE_SIZE, co
 
   return image
 
-def two_augmented_views(image_bytes, first_transform, second_transform, dtype=tf.float32, image_size=IMAGE_SIZE,
-                        config=None):
+def two_augmented_views(image_bytes, first_transform, second_transform, dtype=tf.float32, 
+                        image_size=IMAGE_SIZE, config=None, cutout_sizes=(-1, -1)):
     
     if config.dataset not in ["cifar10", "cifar100", "svhn_cropped"]:
         first = _decode_and_random_crop(image_bytes, image_size)
@@ -180,16 +180,21 @@ def two_augmented_views(image_bytes, first_transform, second_transform, dtype=tf
     first = first_transform(tf.cast(first, tf.uint8))
     first = normalize_image(first, config.mean, config.std)
     first = tf.image.convert_image_dtype(first, dtype)
-
+    if cutout_sizes[0] != -1:
+        first = augmentations.cutout(first, cutout_sizes[0])
+    
     second = second_transform(tf.cast(second, tf.uint8))
     second = normalize_image(second, config.mean, config.std)
     second = tf.image.convert_image_dtype(second, dtype)
+    if cutout_sizes[1] != -1:
+        second = augmentations.cutout(second, cutout_sizes[1])
     
     return first, second
     
 def _solve_transform(transform_name):
     transforms = []
     transform_functions = transform_name.split("-")
+    cutout_size = -1
     for transform in transform_functions:
         if transform == "hflip":
             transforms.append(tf.image.random_flip_left_right)
@@ -208,9 +213,17 @@ def _solve_transform(transform_name):
             transforms.append(partial(augmentations.stacked_randaugment,
                                       s=float(s), num_layers=int(num_layers[1:]), magnitude=int(magnitude[1:]),
                                       probability=float(prob[1:]) ))
+        
+        elif transform.startswith("cutout"):
+            _, size = transform.split("_")
+            cutout_size = int(size) // 2
+            
+        else:
+            raise ValueError("Unknown transform : ", transform)
+            
+    return partial(augmentations.compose_transforms, augmentations=transforms), cutout_size
 
-    return partial(augmentations.compose_transforms, augmentations=transforms)
-    
+
 def create_split(dataset_builder, batch_size, train, dtype=tf.float32,
                  image_size=IMAGE_SIZE, cache=False, config=None):
   """Creates a split from the ImageNet dataset using TensorFlow Datasets.
@@ -237,14 +250,22 @@ def create_split(dataset_builder, batch_size, train, dtype=tf.float32,
     start = jax.process_index() * split_size
     split = dataset_key + f'[{start}:{start + split_size}]'
 
-  first_transform = _solve_transform(config.first_transform)
-  second_transform = _solve_transform(config.second_transform)
+  first_transform, first_cutout_size = _solve_transform(config.first_transform)
+  second_transform, second_cutout_size = _solve_transform(config.second_transform)
   
-  logging.info(" first transform : ", first_transform)
-  logging.info(" second transform : ", second_transform)
+  logging.info(" first transform : " +  str(first_transform))
+  logging.info(" second transform : " +  str(second_transform))
 
-  train_transform = partial(two_augmented_views, first_transform=first_transform, second_transform=second_transform,
-                            dtype=dtype, image_size=config.image_size, config=config)
+  if first_cutout_size != -1:
+    logging.info("using Cutout(" + str(first_cutout_size * 2) + ") on first branch")
+  if second_cutout_size != -1:
+    logging.info("using Cutout(" + str(second_cutout_size * 2) + ") on second branch")
+    
+  train_transform = partial(two_augmented_views, first_transform=first_transform, 
+                            second_transform=second_transform, dtype=dtype, 
+                            image_size=config.image_size, config=config, 
+                            cutout_sizes=(first_cutout_size, second_cutout_size))
+    
   def decode_example(example):
     if train:
       image1, image2 = train_transform(example['image'], dtype=dtype, 
