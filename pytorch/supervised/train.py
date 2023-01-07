@@ -50,8 +50,11 @@ def normal_step(batch, model, criterion, device, step, optimizer, args, sam=Fals
             optimizer.second_step(zero_grad=True)
     else:
         optimizer.step()
-            
-    return first_logits, second_logits, first_features[-1], second_features[-1], y, loss
+
+    if type(first_features) is list and type(second_features) is list:
+        return first_logits, second_logits, first_features[-1], second_features[-1], y, loss
+    else:
+        return first_logits, second_logits, first_features, second_features, y, loss
             
 
 def sam_step(batch, model, criterion, device, step, optimizer, args):
@@ -70,12 +73,18 @@ def sam_step(batch, model, criterion, device, step, optimizer, args):
     _loss.backward()        
     optimizer.first_step()
     
+    if args.sam_batch_handling:
+        disable_running_stats(model)
+        
     first_logits, y, loss = normal_step(batch, model, criterion, device,
                                         args.sam_second_step, optimizer, args, 
                                         sam=True, sam_step="second")
     optimizer.second_step()
     
-    return _first_logits, _second_logits, _first_features[-1], _second_features[-1], y, _loss
+    if type(first_features) is list and type(second_features) is list:
+        return first_logits, second_logits, first_features[-1], second_features[-1], y, loss
+    else:
+        return first_logits, second_logits, first_features, second_features, y, loss
     
 
 def _check_nan_grads(model):
@@ -107,7 +116,7 @@ def train(args, train_set=None, test_set=None, clean_train_set=None,
 
         if args.model_ema and iteration % args.model_ema_steps == 0:
             model_ema.update(model)   
-
+              
         for key, item in calculate_norms(model, first_logits, second_logits, first_features, second_features).items():
             train_metrics[key].append(item)
         
@@ -409,7 +418,8 @@ if __name__ == "__main__":
         print("\n\t", key, " : ", np.mean([i[key] for i in metrics]), sep="", end="", flush=True)
     
     mean_metrics = {key : np.mean([i[key] for i in metrics]) for key in metrics[0].keys()}
-    
+    mean_metrics["accuracy_std"] = np.std([i["accuracy"] for i in metrics])
+                                           
     outfile = open(args.outfile, "a")
     outfile.write(json.dumps({"task" : args.task, "name" : name, "eval" : mean_metrics}) + "\n")
     outfile.close()

@@ -9,6 +9,8 @@ import random
 from models import WideResNet
 import timm
 from losses import jensen_shannon
+from torchvision import models
+
 
 def handle_optimizer(model, args):
     arguments = dict(lr=args.lr, weight_decay=args.weight_decay)
@@ -137,31 +139,64 @@ def freeze_layers(model):
         if isinstance(child, timm.models.layers.linear.Linear) or isinstance(child, nn.Linear):
             for param in child.parameters():
                 param.requires_grad = True   
-
+            
 class TimmWrapper(nn.Module):
-    def __init__(self, model):
+    def __init__(self, model, num_classes):
         super(TimmWrapper, self).__init__()
         self.model = model
+        self.fc = nn.Linear(model.num_features, num_classes)
     
     def forward(self, x, return_features=False):
         if self.training or return_features:
-            x = self.model.forward_features(x)
-            features = self.model.global_pool(x)
-            logits = self.model.get_classifier()(features)
+            features = self.model(x)
+            logits = self.fc(features)
             return features, logits
         else:
-            return self.model(x)
+            return self.fc(self.model(x))
+
+
+class ResnetWrapper(nn.Module):
+    def __init__(self, model, num_classes):
+        super(ResnetWrapper, self).__init__()
+        model.fc = nn.Linear(model.fc.in_features, num_classes)
+        self.model = model
+
+    def _forward_impl(self, x):
+        # See note [TorchScript super()]
+        x = self.model.conv1(x)
+        x = self.model.bn1(x)
+        x = self.model.relu(x)
+        x = self.model.maxpool(x)
+
+        x = self.model.layer1(x)
+        x = self.model.layer2(x)
+        x = self.model.layer3(x)
+        x = self.model.layer4(x)
+
+        x = self.model.avgpool(x)
+        features = torch.flatten(x, 1)
+        x = self.model.fc(features)
+        if self.training:
+            return features, x
+        else:
+            return x
+        
+    def forward(self, x):
+        return self._forward_impl(x)
+    
 
 def create_model(args):
     if args.model == "wide-resnet":
         model = WideResNet(args.resnet_depth, args.num_classes, widen_factor=args.resnet_width, dropRate=args.dropout)
     else:
-        model = TimmWrapper(timm.create_model(args.model, num_classes=args.num_classes, pretrained=(not args.random_init)).train())
-        
+        model = ResnetWrapper(models.resnet50(pretrained=True), args.num_classes)
+        #model = TimmWrapper(timm.create_model(args.model, num_classes=0, pretrained=True), args.num_classes)
+            
     if args.freeze_layers:
         freeze_layers(model)
     
-    return model.train()
+    model.train()
+    return model
         
         
     

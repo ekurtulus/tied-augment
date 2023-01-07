@@ -7,7 +7,7 @@ if __name__ == "__main__":
     parser.add_argument("--step", type=int, required=True)
     args = parser.parse_args()
     
-    q = open("experiments.txt").read().splitlines()
+    q = open("finetune_experiments.txt").read().splitlines()
 
     with open("run_experiments.sh", "w") as outfile:
         outfile.write("#!/bin/bash\n\n")

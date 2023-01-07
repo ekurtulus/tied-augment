@@ -241,10 +241,13 @@ class ContrastiveLayerwiseWrapper(nn.Module):
         self.loss = loss
         
     def forward(self, first_features, second_features):
-        loss = 0
-        for layer, weight in zip(self.layers, self.layer_weights):
-            loss += self.loss(first_features[layer], second_features[layer]) * weight
-        return loss
+        if type(first_features) is list and type(second_features) is list:
+            loss = 0
+            for layer, weight in zip(self.layers, self.layer_weights):
+                loss += self.loss(first_features[layer], second_features[layer]) * weight
+            return loss
+        else:
+            return self.loss(first_features, second_features)
     
     
 def contrastive_handler(args):
@@ -264,7 +267,7 @@ def contrastive_handler(args):
         contrastive = VicReg(sim_loss_weight=args.vicreg_sim_weight,
                              var_loss_weight=args.vicreg_var_weight,
                              cov_loss_weight=args.vicreg_cov_weight,)    
-    return ContrastiveLayerwiseWrapper(args, contrastive)
+    return contrastive
 
         
 class CriterionHandler(nn.Module):
