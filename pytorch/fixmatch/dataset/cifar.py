@@ -6,7 +6,7 @@ from PIL import Image
 from torchvision import datasets
 from torchvision import transforms
 
-from .randaugment import RandAugmentMC
+from .randaugment import RandAugmentMC, Cutout
 
 logger = logging.getLogger(__name__)
 
@@ -63,7 +63,7 @@ def get_cifar10(args, root="../datasets"):
 
     train_unlabeled_dataset = CIFAR10SSL(
         root, train_unlabeled_idxs, train=True,
-        transform=TransformFixMatch(mean=cifar10_mean, std=cifar10_std))
+        transform=TransformFixMatch(mean=cifar10_mean, std=cifar10_std, "cifar10"))
 
     test_dataset = datasets.CIFAR10(
         root, train=False, transform=transform_val, download=False)
@@ -103,7 +103,7 @@ def get_cifar100(args, root):
 
     train_unlabeled_dataset = CIFAR100SSL(
         root, train_unlabeled_idxs, train=True,
-        transform=TransformFixMatch(mean=cifar100_mean, std=cifar100_std))
+        transform=TransformFixMatch(mean=cifar100_mean, std=cifar100_std, "cifar100"))
 
     test_dataset = datasets.CIFAR100(
         root, train=False, transform=transform_val, download=False)
@@ -133,7 +133,7 @@ def x_u_split(args, labels):
 
 
 class TransformFixMatch(object):
-    def __init__(self, mean, std):
+    def __init__(self, mean, std, dataset):
         self.weak = transforms.Compose([
             transforms.RandomHorizontalFlip(),
             transforms.RandomCrop(size=32,
@@ -147,12 +147,14 @@ class TransformFixMatch(object):
             RandAugmentMC(n=2, m=10)])
         self.normalize = transforms.Compose([
             transforms.ToTensor(),
-            transforms.Normalize(mean=mean, std=std)])
+            transforms.Normalize(mean=mean, std=std),
+        ])
+        self.cutout = Cutout(length=16 if dataset == "cifar10" else 8)
 
     def __call__(self, x):
         weak = self.weak(x)
         strong = self.strong(x)
-        return self.normalize(weak), self.normalize(strong)
+        return self.normalize(weak), self.cutout(self.normalize(strong))
 
 
 class CIFAR10SSL(datasets.CIFAR10):

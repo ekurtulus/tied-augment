@@ -36,28 +36,49 @@ def Contrast(img, v, max_v, bias=0):
     return PIL.ImageEnhance.Contrast(img).enhance(v)
 
 
-def Cutout(img, v, max_v, bias=0):
-    if v == 0:
+class Cutout:
+    """Randomly mask out one or more patches from an image.
+    Args:
+        n_holes (int): Number of patches to cut out of each image.
+        length (int): The length (in pixels) of each square patch.
+    """
+    def __init__(self, n_holes=1, length=16):
+        self.n_holes = n_holes
+        self.length = length
+        
+    def __call__(self, img):
+        """
+        Args:
+            img (Tensor): Tensor image of size (C, H, W).
+        Returns:
+            Tensor: Image with n_holes of dimension length x length cut out of it.
+        """
+        h = img.size(1)
+        w = img.size(2)
+        mask = torch.ones((h, w), dtype=torch.float32)
+        for n in range(self.n_holes):
+            y = np.random.randint(h)
+            x = np.random.randint(w)
+
+            y1 = np.clip(y - self.length // 2, 0, h)
+            y2 = np.clip(y + self.length // 2, 0, h)
+            x1 = np.clip(x - self.length // 2, 0, w)
+            x2 = np.clip(x + self.length // 2, 0, w)
+
+            mask[y1: y2, x1: x2] = 0.
+
+        mask = mask.expand_as(img)
+        img = img * mask
+
         return img
-    v = _float_parameter(v, max_v) + bias
-    v = int(v * min(img.size))
-    return CutoutAbs(img, v)
+    
+    def __repr__(self):
+        s = self.__class__.__name__ + '('
+        s += "n_holes={n_holes}"
+        s += ", length={length}"
+        s += ")"
+        return s.format(**self.__dict__)        
 
-
-def CutoutAbs(img, v, **kwarg):
-    w, h = img.size
-    x0 = np.random.uniform(0, w)
-    y0 = np.random.uniform(0, h)
-    x0 = int(max(0, x0 - v / 2.))
-    y0 = int(max(0, y0 - v / 2.))
-    x1 = int(min(w, x0 + v))
-    y1 = int(min(h, y0 + v))
-    xy = (x0, y0, x1, y1)
-    # gray
-    color = (127, 127, 127)
-    img = img.copy()
-    PIL.ImageDraw.Draw(img).rectangle(xy, color)
-    return img
 
 
 def Equalize(img, **kwarg):
@@ -198,7 +219,6 @@ class RandAugmentPC(object):
             prob = np.random.uniform(0.2, 0.8)
             if random.random() + prob >= 1:
                 img = op(img, v=self.m, max_v=max_v, bias=bias)
-        img = CutoutAbs(img, int(32*0.5))
         return img
 
 
@@ -216,5 +236,4 @@ class RandAugmentMC(object):
             v = np.random.randint(1, self.m)
             if random.random() < 0.5:
                 img = op(img, v=v, max_v=max_v, bias=bias)
-        img = CutoutAbs(img, int(32*0.5))
         return img
