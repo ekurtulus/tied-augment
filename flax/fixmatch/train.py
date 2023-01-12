@@ -93,7 +93,7 @@ def cross_entropy_double(first_probs, second_probs, first_labels,
         ce = (ce + cross_entropy_loss(second_probs, second_labels) ) / 2
     return ce    
 
-def cross_entropy_loss(probs, labels, dtype=jnp.float32):
+def cross_entropy_loss(probs, labels, dtype=jnp.float32, reduction="mean"):
     """Compute cross entropy for logits and labels w/ label smoothing
     Args:
         logits: [batch, length, num_classes] float array.
@@ -101,8 +101,18 @@ def cross_entropy_loss(probs, labels, dtype=jnp.float32):
         label_smoothing: label smoothing constant, used to determine the on and off values.
         dtype: dtype to perform loss calcs in, including log_softmax
     """
-    return -jnp.mean(jnp.sum(probs * labels, axis=-1))
+    loss = -jnp.sum(probs * labels, axis=-1)
+    if reduction == "mean":
+      return jnp.mean(loss)
+    else:
+      return loss
 
+def pseudolabel_loss(weak_logits, strong_logits, temperature, threshold):
+  pseudo_labels = jax.nn.softmax(jax.lax.stop_gradient(weak_logits)) / temperature
+  max_probs = jnp.max(pseudo_labels, -1)
+  labels_u = jnp.argmax(pseudo_labels, -1)
+  mask = jnp.greater(max_probs, threshold).astype(jnp.float32)
+  return jnp.mean(cross_entropy_loss(strong_logits, labels_u, reduction="none") * mask)
 
 @partial(jax.jit, static_argnums=(7,8,9,10,11))
 def criterion(first_logits, second_logits, first_features, second_features, 
@@ -255,7 +265,7 @@ def mixup(key, alpha, images, labels):
 
   return mixed_images, mixed_labels, lam
 
-def train_step(state, batch, key, learning_rate_fn, config, tw=-1, dropout_key=None):
+def train_step(state, supervised_batch, unsupervised_batch, key, learning_rate_fn, config, tw=-1, dropout_key=None):
   dropout_key = jax.random.fold_in(dropout_key, state.step)
   first_images, second_images = batch["image1"], batch["image2"]
   first_labels, second_labels = (jax.nn.one_hot(batch["label"], config.num_classes, dtype=jnp.float32), 
@@ -566,7 +576,7 @@ def train_and_evaluate(config) -> TrainState:
   dataset_builder = tfds.builder(config.dataset)
   dataset_builder.download_and_prepare()
 
-  train_iter = create_input_iter(
+  supervised_train_iter, unsupervised_train_iter = create_input_iter(
       dataset_builder, local_batch_size, config.image_size, input_dtype, True,
           config.cache, config)
   eval_iter = create_input_iter(
@@ -628,7 +638,8 @@ def train_and_evaluate(config) -> TrainState:
     hooks += [periodic_actions.Profile(num_profile_steps=5, logdir=config.workdir)]
   train_metrics_last_t = time.time()
   logging.info('Initial compilation, this might take some minutes...')
-  for step, batch in zip(range(step_offset, num_steps), train_iter):
+  for step, supervised_batch, unsupervised_batch in zip(range(step_offset, num_steps), supervised_train_iter,
+                                                        unsupervised_train_iter):
     rng, mixup_key = random.split(rng)
     mixup_key = jax_utils.replicate(mixup_key)
     dropout_rng = common_utils.shard_prng_key(rng)
@@ -636,7 +647,7 @@ def train_and_evaluate(config) -> TrainState:
     tw = tw_scheduler(step)
     tw = jax_utils.replicate(tw)
 
-    state, metrics = p_train_step(state, batch, key=mixup_key, tw=tw, 
+    state, metrics = p_train_step(state, supervised_batch, unsupervised_batch, key=mixup_key, tw=tw, 
                                   dropout_key=dropout_rng)
     for h in hooks:
       h(step)
