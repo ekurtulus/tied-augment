@@ -406,14 +406,19 @@ def prepare_tf_data(xs):
   return jax.tree_util.tree_map(_prepare, xs)
 
 
+def _prep_dataset(ds):
+  it = map(prepare_tf_data, ds)
+  it = jax_utils.prefetch_to_device(it, 2)
+  return it 
+
 def create_input_iter(dataset_builder, batch_size, image_size, dtype, train,
                       cache, config):
   ds = input_pipeline.create_split(
               dataset_builder, batch_size, train, image_size=image_size, dtype=dtype,
               cache=cache, config=config)
-  it = map(prepare_tf_data, ds)
-  it = jax_utils.prefetch_to_device(it, 2)
-  return it
+  if type(ds) is tuple:      
+    return _prep_dataset(ds[0]), _prep_dataset(ds[1])
+  return _prep_dataset(ds)
 
 
 class TrainState(train_state.TrainState):

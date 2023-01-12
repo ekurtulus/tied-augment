@@ -153,9 +153,17 @@ def preprocess_for_eval(image_bytes, dtype=tf.float32, image_size=IMAGE_SIZE, co
 
   return image
 
-def augmented_view(image_bytes, transform, dtype=tf.float32,
-                   image_size=IMAGE_SIZE, config=None, 
-                   cutout_size=(-1,-1) ):
+def augmented_view(image, transform, image_size=IMAGE_SIZE, dtype=tf.float32,
+             config=None, cutout_size=-1):
+
+  image = tf.reshape(image, [image_size, image_size, 3])
+  image = transform(tf.cast(image, tf.uint8))
+  image = normalize_image(image, config.mean, config.std)
+  image = tf.image.convert_image_dtype(image, dtype)
+  if cutout_size != -1:
+    image = augmentations.cutout(image, cutout_size)
+  return image
+
 
 def two_augmented_views(image_bytes, first_transform, second_transform, dtype=tf.float32, 
                         image_size=IMAGE_SIZE, config=None, cutout_sizes=(-1, -1)):
@@ -178,20 +186,11 @@ def two_augmented_views(image_bytes, first_transform, second_transform, dtype=tf
         else:
             second = first
 
-    first = tf.reshape(first, [image_size, image_size, 3])
-    second = tf.reshape(second, [image_size, image_size, 3])    
-    
-    first = first_transform(tf.cast(first, tf.uint8))
-    first = normalize_image(first, config.mean, config.std)
-    first = tf.image.convert_image_dtype(first, dtype)
-    if cutout_sizes[0] != -1:
-        first = augmentations.cutout(first, cutout_sizes[0])
-    
-    second = second_transform(tf.cast(second, tf.uint8))
-    second = normalize_image(second, config.mean, config.std)
-    second = tf.image.convert_image_dtype(second, dtype)
-    if cutout_sizes[1] != -1:
-        second = augmentations.cutout(second, cutout_sizes[1])
+    first = augmented_view(first, first_transform, image_size=image_size,
+                                    dtype=dtype, config=config, cutout_size=cutout_sizes[0])
+
+    second = augmented_view(second, second_transform, image_size=image_size,
+                                    dtype=dtype, config=config, cutout_size=cutout_sizes[1])
     
     return first, second
     
@@ -226,6 +225,31 @@ def _solve_transform(transform_name):
             raise ValueError("Unknown transform : ", transform)
             
     return partial(augmentations.compose_transforms, augmentations=transforms), cutout_size
+
+def _create_dataset(dataset_builder, split, train, transform,
+                    cache=False, batch_size=128):
+  ds = dataset_builder.as_dataset(split=split, decoders={
+      'image': tfds.decode.SkipDecoding(),
+  })
+  options = tf.data.Options()
+  options.experimental_threading.private_threadpool_size = 48
+  ds = ds.with_options(options)
+
+  if cache:
+    ds = ds.cache()
+
+  if train:
+    ds = ds.repeat()
+    ds = ds.shuffle(16 * batch_size, seed=0)
+
+  ds = ds.map(transform, num_parallel_calls=tf.data.experimental.AUTOTUNE)
+  ds = ds.batch(batch_size, drop_remainder=True)
+
+  if not train:
+    ds = ds.repeat()
+
+  ds = ds.prefetch(10)
+  return ds
 
 
 def create_split(dataset_builder, batch_size, train, dtype=tf.float32,
@@ -274,38 +298,38 @@ def create_split(dataset_builder, batch_size, train, dtype=tf.float32,
                                    second_transform=unsupervised_transform_strong, dtype=dtype,
                                    image_size=config.image_size, config=config, 
                                    cutout_sizes=(unsupervised_transform_weak_cutout_size,
-                                                 unsupervised_transform_strong) )
-    
-  def decode_example(example):
-    if train:
+                                                 unsupervised_transform_strong_cutout_size) )
+
+  if config.similarity_loss_on == "labeled":
+    supervised_transform = partial(two_augmented_views, first_transform=supervised_transform,
+                                   second_transform=supervised_transform, 
+                                  image_size=config.image_size, dtype=dtype, config=config,
+                                  cutout_size=(supervised_transform_cutout_size, supervised_transform_cutout_size))
+  else:
+    supervised_transform = partial(augmented_view, transform=supervised_transform,
+                                  image_size=config.image_size, dtype=dtype, config=config,
+                                  cutout_size=supervised_transform_cutout_size)
+
+  def decode_example(example, train_transform=None, single_image=False):
+    if train and not single_image:
       image1, image2 = train_transform(example['image'], dtype=dtype, 
                                        image_size=config.image_size)
       return {"image1" : image1, "image2" : image2, "label" : example["label"]}
+    elif train and single_image:
+      image = train_transform(example["image"], dtype=dtype, image_size=config.image_size)
+      return {"image" : image, "label" : example["label"]}
     else:
       image = preprocess_for_eval(example['image'], dtype, config.image_size, config=config)
       return {'image': image, 'label': example['label']}
 
-  ds = dataset_builder.as_dataset(split=split, decoders={
-      'image': tfds.decode.SkipDecoding(),
-  })
-  options = tf.data.Options()
-  options.experimental_threading.private_threadpool_size = 48
-  ds = ds.with_options(options)
-
-  if cache:
-    ds = ds.cache()
-
   if train:
-    ds = ds.repeat()
-    ds = ds.shuffle(16 * batch_size, seed=0)
+    supervised_dataset = _create_dataset(dataset_builder, supervised_split, train,
+                                         partial(decode_example, supervised_transform, single_image=config.similarity_loss_on=="labeled"), cache=cache,
+                                         batch_size=batch_size)
 
-  ds = ds.map(decode_example, num_parallel_calls=tf.data.experimental.AUTOTUNE)
-  ds = ds.batch(batch_size, drop_remainder=True)
-
-  if not train:
-    ds = ds.repeat()
-
-  ds = ds.prefetch(10)
-
-  return ds
-  
+    unsupervised_dataset = _create_dataset(dataset_builder, unsupervised_split, train,
+                                           partial(decode_example, unsupervised_transform), cache=cache,
+                                           batch_size=batch_size)
+    return supervised_dataset, unsupervised_dataset
+  else:
+    return _create_dataset(dataset_builder, split, train, decode_example, cache=cache, batch_size=batch_size)

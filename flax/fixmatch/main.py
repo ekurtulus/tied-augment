@@ -86,6 +86,8 @@ flags.DEFINE_string('sam_second_step', 'ce-similarity', 'second step of sam')
 flags.DEFINE_float('mixup_alpha', 0.0, 'mixup alpha (if 0, no mixup is applied')
 
 flags.DEFINE_integer("num_labeled", 10000, "number of labeled images")
+flags.DEFINE_string("similarity_loss_on", "unlabeled", "apply supervised loss on")
+
 
 def main(argv):
   if len(argv) > 1:
