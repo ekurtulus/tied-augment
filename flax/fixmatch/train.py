@@ -47,145 +47,6 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import flax.serialization as serialization
 import flax.struct as struct
 
-"""
-TODO:
-- EMA
-- label smoothing
-"""
-def create_model(*, model_cls, half_precision, num_classes, **kwargs):
-  platform = jax.local_devices()[0].platform
-  if half_precision:
-    if platform == 'tpu':
-      model_dtype = jnp.bfloat16
-    else:
-      model_dtype = jnp.float16
-  else:
-    model_dtype = jnp.float32
-  return model_cls(num_classes=num_classes, dtype=model_dtype, **kwargs)
-
-
-def initialized(keys, image_size, model):
-  input_shape = (2, image_size, image_size, 3)
-  @jax.jit
-  def init(*args):
-    return model.init(*args)
-  variables = init({'params': keys[0], 'dropout' : keys[1]}, jnp.ones(input_shape, model.dtype))
-  return variables['params'], variables['batch_stats']
- 
-def l2_loss(first_features, second_features):
-    return jnp.mean((first_features - second_features) ** 2)
-
-def l1_loss(first_features, second_features):
-    return jnp.mean(jnp.abs(first_features - second_features))
-
-def l2_normalized(first_features, second_features):
-    return l2_loss( first_features / jnp.linalg.norm(first_features), 
-                    second_features / jnp.linalg.norm(second_features), 
-                  )
-
-def cosine_similarity(first_features, second_features):
-    return jnp.mean(optax.cosine_similarity(first_features, second_features))
-
-def cross_entropy_double(first_probs, second_probs, first_labels, 
-                         second_labels, both_branches_supervised=False):
-    ce = cross_entropy_loss(first_probs, first_labels)
-    if both_branches_supervised:
-        ce = (ce + cross_entropy_loss(second_probs, second_labels) ) / 2
-    return ce    
-
-def cross_entropy_loss(probs, labels, dtype=jnp.float32, reduction="mean"):
-    """Compute cross entropy for logits and labels w/ label smoothing
-    Args:
-        logits: [batch, length, num_classes] float array.
-        labels: categorical labels [batch, length] int array.
-        label_smoothing: label smoothing constant, used to determine the on and off values.
-        dtype: dtype to perform loss calcs in, including log_softmax
-    """
-    loss = -jnp.sum(probs * labels, axis=-1)
-    if reduction == "mean":
-      return jnp.mean(loss)
-    else:
-      return loss
-
-def pseudolabel_loss(weak_logits, strong_logits, temperature, threshold):
-  pseudo_labels = jax.nn.softmax(jax.lax.stop_gradient(weak_logits)) / temperature
-  max_probs = jnp.max(pseudo_labels, -1)
-  labels_u = jnp.argmax(pseudo_labels, -1)
-  mask = jnp.greater(max_probs, threshold).astype(jnp.float32)
-  return jnp.mean(cross_entropy_loss(strong_logits, labels_u, reduction="none") * mask)
-
-@partial(jax.jit, static_argnums=(7,8,9,10,11))
-def criterion(first_logits, second_logits, first_features, second_features, 
-              first_labels, second_labels, similarity_weight=1.0, label_smoothing=0.0, 
-              both_branches_supervised=False, cross_entropy=True, similarity=True, loss_type="l2"):
-    
-    num_classes = first_logits.shape[-1]
-    
-    if label_smoothing > 0:
-        first_labels = first_labels * (1 - label_smoothing) + label_smoothing / num_classes
-        second_labels = second_labels * (1 - label_smoothing) + label_smoothing / num_classes
-
-    if loss_type == "cosine":
-        similarity_fn = cosine_similarity
-    elif loss_type == "l1":
-        similarity_fn = l1_loss
-    elif loss_type == "l2":
-        similarity_fn = l2_loss
-    elif loss_type == "l2_normalized":
-        similarity_fn = l2_normalized
-    
-    first_probs = jax.nn.log_softmax(first_logits.astype(jnp.float32))
-    second_probs = jax.nn.log_softmax(second_logits.astype(jnp.float32))
-    
-    if not similarity and cross_entropy:
-        return cross_entropy_double(first_probs, second_probs, first_labels, second_labels, 
-                                    both_branches_supervised=both_branches_supervised)
-    
-    elif similarity and not cross_entropy:
-        return similarity_fn(first_features, second_features)
-    
-    else:
-        return cross_entropy_double(first_probs, second_probs, first_labels, second_labels,
-                                    both_branches_supervised=both_branches_supervised) + similarity_weight * similarity_fn(first_features, second_features)
-    
-
-def acc_topk(logits, labels, topk=(1,5)):
-    top = lax.top_k(logits, max(topk))[1].transpose()
-    correct = top == labels.reshape(1, -1)
-    return [correct[:k].reshape(-1).sum(axis=0) * 100 / labels.shape[0] for k in topk]
-
-def compute_eval_metrics(logits, features, labels):
-  loss = cross_entropy_loss(jax.nn.log_softmax(logits.astype(jnp.float32)), 
-                            jax.nn.one_hot(labels, logits.shape[-1], dtype=jnp.float32))  
-  
-  top_1, top_5 = acc_topk(logits, labels)
-  metrics = {
-      'loss': loss,
-      'top-1' : top_1,
-      'top-5' : top_5,
-  }
-  metrics = lax.pmean(metrics, axis_name='batch')
-  return metrics
-
-def compute_train_metrics(first_logits, first_features, second_logits, second_features, labels):
-
-  loss = cross_entropy_loss(jax.nn.log_softmax(first_logits.astype(jnp.float32)), 
-                            jax.nn.one_hot(labels, first_logits.shape[-1], dtype=jnp.float32))  
-  
-  top_1, top_5 = acc_topk(first_logits, labels)
-    
-  metrics = {
-      'loss': loss,
-      'top-1' : top_1,
-      'top-5' : top_5,
-      'l2' : (first_features - second_features) ** 2,
-      'l1' : jnp.abs(first_features - second_features),
-      'cosine' : optax.cosine_similarity(first_features, second_features),
-  }
-  metrics = lax.pmean(metrics, axis_name='batch')
-  return metrics
-
-
 def create_learning_rate_fn(
     schedule,
     config,
@@ -247,62 +108,154 @@ def create_learning_rate_fn(
     return schedule_fn
   return scheduler
 
+def create_model(*, model_cls, half_precision, num_classes, **kwargs):
+  platform = jax.local_devices()[0].platform
+  if half_precision:
+    if platform == 'tpu':
+      model_dtype = jnp.bfloat16
+    else:
+      model_dtype = jnp.float16
+  else:
+    model_dtype = jnp.float32
+  return model_cls(num_classes=num_classes, dtype=model_dtype, **kwargs)
 
-def dual_vector(y: jnp.ndarray) -> jnp.ndarray:
-  """Returns the solution of max_x y^T x s.t. ||x||_2 <= 1.
-  Args:
-    y: A pytree of numpy ndarray, vector y in the equation above.
-  """
-  gradient_norm = jnp.sqrt(sum(
-      [jnp.sum(jnp.square(e)) for e in jax.tree_util.tree_leaves(y)]))
-  normalized_gradient = jax.tree_map(lambda x: x / gradient_norm, y)
-  return normalized_gradient
+def initialized(keys, image_size, model):
+  input_shape = (2, image_size, image_size, 3)
+  @jax.jit
+  def init(*args):
+    return model.init(*args)
+  variables = init({'params': keys[0], 'dropout' : keys[1]}, jnp.ones(input_shape, model.dtype))
+  return variables['params'], variables['batch_stats']
+ 
+def l2_loss(first_features, second_features):
+    return jnp.mean((first_features - second_features) ** 2)
 
-def mixup(key, alpha, images, labels):
-  lam = jax.random.beta(key, alpha, alpha)
-  mixed_images = lam * images + (1. - lam) * images[::-1]
-  mixed_labels = lam * labels + (1. - lam) * labels[::-1]
+def l1_loss(first_features, second_features):
+    return jnp.mean(jnp.abs(first_features - second_features))
 
-  return mixed_images, mixed_labels, lam
+def l2_normalized(first_features, second_features):
+    return l2_loss( first_features / jnp.linalg.norm(first_features), 
+                    second_features / jnp.linalg.norm(second_features), 
+                  )
+
+def cosine_similarity(first_features, second_features):
+    return jnp.mean(optax.cosine_similarity(first_features, second_features))
+
+def cross_entropy_loss(probs, labels, dtype=jnp.float32, reduction="mean"):
+    """Compute cross entropy for logits and labels w/ label smoothing
+    Args:
+        logits: [batch, length, num_classes] float array.
+        labels: categorical labels [batch, length] int array.
+        label_smoothing: label smoothing constant, used to determine the on and off values.
+        dtype: dtype to perform loss calcs in, including log_softmax
+    """
+    loss = -jnp.sum(probs * labels, axis=-1)
+    if reduction == "mean":
+      return jnp.mean(loss)
+    else:
+      return loss
+
+def cross_entropy_double(first_probs, second_probs, first_labels, 
+                         second_labels, both_branches_supervised=False):
+    ce = cross_entropy_loss(first_probs, first_labels)
+    if both_branches_supervised:
+        ce = (ce + cross_entropy_loss(second_probs, second_labels) ) / 2
+    return ce    
+
+def pseudolabel_loss(weak_logits, strong_logits, temperature, threshold):
+  pseudo_labels = jax.nn.softmax(jax.lax.stop_gradient(weak_logits)) / temperature
+  max_probs = jnp.max(pseudo_labels, -1)
+  labels_u = jnp.argmax(pseudo_labels, -1)
+  mask = jnp.greater(max_probs, threshold).astype(jnp.float32)
+  return jnp.mean(cross_entropy_loss(strong_logits, labels_u, reduction="none") * mask)
+
+def acc_topk(logits, labels, topk=(1,5)):
+    top = lax.top_k(logits, max(topk))[1].transpose()
+    correct = top == labels.reshape(1, -1)
+    return [correct[:k].reshape(-1).sum(axis=0) * 100 / labels.shape[0] for k in topk]
+
+def compute_eval_metrics(logits, labels):
+  loss = cross_entropy_loss(jax.nn.log_softmax(logits.astype(jnp.float32)), 
+                            jax.nn.one_hot(labels, logits.shape[-1], dtype=jnp.float32))  
+  
+  top_1, top_5 = acc_topk(logits, labels)
+  metrics = {
+      'loss': loss,
+      'top-1' : top_1,
+      'top-5' : top_5,
+  }
+  metrics = lax.pmean(metrics, axis_name='batch')
+  return metrics
+
+compute_train_metrics = compute_eval_metrics
+
+@partial(jax.jit, static_argnums=(4,5,6,7))
+def criterion(logits, features, labels, similarity_weight=1.0,
+              loss_type="l2", similarity_loss_on="unlabeled", 
+              temperature=1, threshold=0.95):
+
+    if loss_type == "cosine":
+        similarity_fn = cosine_similarity
+    elif loss_type == "l1":
+        similarity_fn = l1_loss
+    elif loss_type == "l2":
+        similarity_fn = l2_loss
+    elif loss_type == "l2_normalized":
+        similarity_fn = l2_normalized
+
+    if similarity_loss_on == "labeled":
+        (supervised, _, weak_unsupervised, strong_unsupervised) = logits
+        (first_supervised_feat, second_supervised_feat, 
+                                   first_unsupervised_feat, second_unsupervised_feat) = features
+        sim_loss = similarity_fn(first_supervised_feat, second_supervised_feat) * similarity_weight
+    else:
+        (supervised, weak_unsupervised, strong_unsupervised) = logits
+        (_, first_unsupervised_feat, second_unsupervised_feat) = features
+        sim_loss = similarity_fn(first_unsupervised_feat, second_unsupervised_feat) * similarity_weight       
+    
+    ce = cross_entropy_loss(supervised, labels) + pseudolabel_loss(weak_unsupervised, strong_unsupervised,
+                                                                    temperature, threshold)
+    return ce + sim_loss
+
+def interleave():
+  pass
+
+def de_interleave():
+  pass
 
 def train_step(state, supervised_batch, unsupervised_batch, key, learning_rate_fn, config, tw=-1, dropout_key=None):
   dropout_key = jax.random.fold_in(dropout_key, state.step)
-  first_images, second_images = batch["image1"], batch["image2"]
-  first_labels, second_labels = (jax.nn.one_hot(batch["label"], config.num_classes, dtype=jnp.float32), 
-                                  jax.nn.one_hot(batch["label"], config.num_classes, dtype=jnp.float32))
-      
-  if config.mixup_alpha > 0:
-    first_images, first_labels, lam = mixup(key, config.mixup_alpha, first_images, first_labels)  
+  
+  if config.similarity_loss_on == "labeled":
+    first, second = supervised_batch["image1"], supervised_batch["image2"]
+    label = supervised_batch["label"]
+    supervised_images = jnp.concatenate((first, second))
+    supervised_label = jnp.concatenate((label, label))
+  else:
+    supervised_images = supervised_batch["image"]
+    supervised_label = supervised_batch["label"]
+
+  weak_unsupervised, strong_unsupervised = unsupervised_batch["image1"], unsupervised_batch["image2"]
+
+  
 
   """Perform a single training step."""
-  def loss_fn(params, cross_entropy=True, similarity=True, loss_type="l2"):
+  def loss_fn(params, loss_type="l2"):
     """loss function used for training."""      
-    if "SBN" in config.model or config.single_forward:
-      images = jnp.concatenate((first_images, second_images))
-      (features, logits), new_model_state = state.apply_fn(
-          {'params': params, 'batch_stats': state.batch_stats},
-          images,
-          mutable=['batch_stats'], 
-          rngs={"dropout" : dropout_key})
-      first_features, second_features = jnp.split(features , 2)
-      first_logits, second_logits = jnp.split(logits , 2)
-    else:    
-      (first_features, first_logits), new_model_state = state.apply_fn(
-          {'params': params, 'batch_stats': state.batch_stats},
-          first_images,
-          mutable=['batch_stats'], 
-          rngs={"dropout" : dropout_key})
-      
-      (second_features, second_logits), new_model_state = state.apply_fn(
-          {'params': params, 
-          'batch_stats': new_model_state["batch_stats"] if not config.no_second_step_bn_update else state.batch_stats},
-          second_images,
-          mutable=['batch_stats'], 
-          rngs={"dropout" : dropout_key})
-    
-    if config.mixup_alpha > 0:
-      second_features = lam * second_features + (1 - lam) * second_features[::-1]
 
+    (first_features, first_logits), new_model_state = state.apply_fn(
+        {'params': params, 'batch_stats': state.batch_stats},
+        first_images,
+        mutable=['batch_stats'], 
+        rngs={"dropout" : dropout_key})
+    
+    (second_features, second_logits), new_model_state = state.apply_fn(
+        {'params': params, 
+        'batch_stats': new_model_state["batch_stats"] if not config.no_second_step_bn_update else state.batch_stats},
+        second_images,
+        mutable=['batch_stats'], 
+        rngs={"dropout" : dropout_key})
+    
     loss = criterion(first_logits, second_logits, first_features, second_features, first_labels,
                      second_labels, both_branches_supervised=config.both_branches_supervised, 
                      similarity_weight=tw, cross_entropy=cross_entropy, similarity=similarity, 
@@ -315,32 +268,7 @@ def train_step(state, supervised_batch, unsupervised_batch, key, learning_rate_f
     weight_penalty = config.weight_decay * 0.5 * weight_l2
     loss = loss + weight_penalty
     return loss, (new_model_state, first_logits, first_features, second_logits, second_features)
-  
-  
-  def get_sam_gradient(model, rho, first_step, second_step, loss_type):
-    """Returns the gradient of the SAM loss loss, updated state and logits.
-    See https://arxiv.org/abs/2010.01412 for more details.
-    Args:
-      model: The model that we are training.
-      rho: Size of the perturbation.
-    """
-    # compute gradient on the whole batch
-    
-    first_args = {"cross_entropy" : "ce" in first_step, "similarity" : "similarity" in first_step, "loss_type" : loss_type}
-    second_args = {"cross_entropy" : "ce" in second_step, "similarity" : "similarity" in second_step, "loss_type" : loss_type}
-    
-    (_, (inner_state, _, _, _, _)), grad = jax.value_and_grad(
-        lambda m: loss_fn(m, **first_args), has_aux=True)(model)
-    
-    grad = dual_vector(grad)
-    noised_model = jax.tree_util.tree_map(lambda a, b: a + rho * b,
-                                     model, grad)
-    
-    (_, (_, first_logits, first_features, second_logits, second_features)), grad = jax.value_and_grad(
-        lambda m: loss_fn(m, **second_args), has_aux=True)(noised_model)
-    
-    return (inner_state, first_logits, first_features, second_logits, second_features), grad
-    
+   
   step = state.step
   dynamic_scale = state.dynamic_scale
   lr = learning_rate_fn(step)
@@ -350,16 +278,11 @@ def train_step(state, supervised_batch, unsupervised_batch, key, learning_rate_f
         loss_fn, has_aux=True, axis_name='batch')
     dynamic_scale, is_fin, aux, grads = grad_fn(state.params)
     # dynamic loss takes care of averaging gradients across replicas
-  else:
-    if config.rho > 0:
-        aux, grads = get_sam_gradient(state.params, config.rho, config.sam_first_step, 
-                                     config.sam_second_step, config.loss_type)
-        grads = lax.pmean(grads, axis_name='batch')
-    else:    
-        grad_fn = jax.value_and_grad(lambda m : loss_fn(m, loss_type=config.loss_type), has_aux=True)
-        aux, grads = grad_fn(state.params)
-        grads = lax.pmean(grads, axis_name='batch')
-        aux = aux[1]
+  else:   
+    grad_fn = jax.value_and_grad(lambda m : loss_fn(m, loss_type=config.loss_type), has_aux=True)
+    aux, grads = grad_fn(state.params)
+    grads = lax.pmean(grads, axis_name='batch')
+    aux = aux[1]
         
   new_model_state, first_logits, first_features, second_logits, second_features = aux
   metrics = compute_train_metrics(first_logits, first_features, second_logits, second_features, batch['label'])
@@ -393,14 +316,14 @@ def eval_step(state, batch):
   features, logits = state.apply_fn(
       variables, batch['image'], train=False, mutable=False)
   logging.info("eval step compiled ! ")
-  return compute_eval_metrics(logits, features, batch['label'])
+  return compute_eval_metrics(logits, batch['label'])
 
 def eval_step_ema(state, batch):
   variables = {'params': state.ema.params, 'batch_stats' : state.ema.batch_stats}
   features, logits = state.apply_fn(
       variables, batch['image'], train=False, mutable=False)
   logging.info("eval step compiled ! ")
-  return compute_eval_metrics(logits, features, batch['label'])  
+  return compute_eval_metrics(logits, batch['label'])  
 
 def prepare_tf_data(xs):
   """Convert a input batch from tf Tensors to numpy arrays."""

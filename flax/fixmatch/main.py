@@ -88,6 +88,10 @@ flags.DEFINE_float('mixup_alpha', 0.0, 'mixup alpha (if 0, no mixup is applied')
 flags.DEFINE_integer("num_labeled", 10000, "number of labeled images")
 flags.DEFINE_string("similarity_loss_on", "unlabeled", "apply supervised loss on")
 
+flags.DEFINE_float("threshold", 0.95, "pseudolabel temperature")
+flags.DEFINE_float("temperature", 1, "temperature value") 
+flags.DEFINE_integer("mu", 7, "fixmatch mu")
+
 
 def main(argv):
   if len(argv) > 1:

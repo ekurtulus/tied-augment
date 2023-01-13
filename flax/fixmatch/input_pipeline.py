@@ -329,7 +329,7 @@ def create_split(dataset_builder, batch_size, train, dtype=tf.float32,
 
     unsupervised_dataset = _create_dataset(dataset_builder, unsupervised_split, train,
                                            partial(decode_example, unsupervised_transform), cache=cache,
-                                           batch_size=batch_size)
+                                           batch_size=batch_size*config.mu)
     return supervised_dataset, unsupervised_dataset
   else:
     return _create_dataset(dataset_builder, split, train, decode_example, cache=cache, batch_size=batch_size)
