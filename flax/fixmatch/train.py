@@ -187,7 +187,19 @@ def compute_eval_metrics(logits, labels):
   metrics = lax.pmean(metrics, axis_name='batch')
   return metrics
 
-compute_train_metrics = compute_eval_metrics
+def compute_train_metrics(logits_x, labels, features_u_w, features_u_s, logits_u_w, logits_u_s):
+  top_1, top_5 = acc_topk(logits_x, labels)
+  metrics = {
+    "top-1" : top_1,
+    "top-5" : top_5,
+    "supervised_loss" : cross_entropy_loss(logits_x, labels),
+    "unsupervised_loss" : pseudolabel_loss(logits_u_w, logits_u_s),
+    "unsupervised-l1" : l1_loss(features_u_w, features_u_s),
+    "unsupervised-l2" : l2_loss(features_u_w, features_u_s),
+    "unsupervised-cosine" : cosine_similarity(features_u_w, features_u_s),
+  }
+  metrics = lax.pmean(metrics, axis_name="batch")
+  return metrics
 
 @partial(jax.jit, static_argnums=(4,5,6,7))
 def criterion(logits, features, labels, similarity_weight=1.0,
@@ -204,7 +216,7 @@ def criterion(logits, features, labels, similarity_weight=1.0,
         similarity_fn = l2_normalized
 
     if similarity_loss_on == "labeled":
-        (supervised, _, weak_unsupervised, strong_unsupervised) = logits
+        (supervised, weak_unsupervised, strong_unsupervised) = logits
         (first_supervised_feat, second_supervised_feat, 
                                    first_unsupervised_feat, second_unsupervised_feat) = features
         sim_loss = similarity_fn(first_supervised_feat, second_supervised_feat) * similarity_weight
@@ -212,54 +224,70 @@ def criterion(logits, features, labels, similarity_weight=1.0,
         (supervised, weak_unsupervised, strong_unsupervised) = logits
         (_, first_unsupervised_feat, second_unsupervised_feat) = features
         sim_loss = similarity_fn(first_unsupervised_feat, second_unsupervised_feat) * similarity_weight       
-    
+
     ce = cross_entropy_loss(supervised, labels) + pseudolabel_loss(weak_unsupervised, strong_unsupervised,
                                                                     temperature, threshold)
     return ce + sim_loss
 
-def interleave():
-  pass
+def interleave(x, size):
+    s = list(x.shape)
+    return x.reshape([-1, size] + s[1:]).transpose(0, 1).reshape([-1] + s[1:])
 
-def de_interleave():
-  pass
+def de_interleave(x, size):
+    s = list(x.shape)
+    return x.reshape([size, -1] + s[1:]).transpose(0, 1).reshape([-1] + s[1:])
 
 def train_step(state, supervised_batch, unsupervised_batch, key, learning_rate_fn, config, tw=-1, dropout_key=None):
   dropout_key = jax.random.fold_in(dropout_key, state.step)
   
   if config.similarity_loss_on == "labeled":
     first, second = supervised_batch["image1"], supervised_batch["image2"]
-    label = supervised_batch["label"]
     supervised_images = jnp.concatenate((first, second))
-    supervised_label = jnp.concatenate((label, label))
   else:
     supervised_images = supervised_batch["image"]
-    supervised_label = supervised_batch["label"]
 
   weak_unsupervised, strong_unsupervised = unsupervised_batch["image1"], unsupervised_batch["image2"]
-
+  inputs = interleave(jnp.concatenate((supervised_images, weak_unsupervised, strong_unsupervised)),
+                       2*config.mu+1 if config.labeled_loss_on == "unlabeled" else 2*config.mu+2)
   
+  batch_size = config.batch_size if config.similarity_loss_on == "unlabeled" else config.batch_size * 2
 
   """Perform a single training step."""
   def loss_fn(params, loss_type="l2"):
     """loss function used for training."""      
 
-    (first_features, first_logits), new_model_state = state.apply_fn(
+    (features, logits), new_model_state = state.apply_fn(
         {'params': params, 'batch_stats': state.batch_stats},
-        first_images,
+        inputs,
         mutable=['batch_stats'], 
         rngs={"dropout" : dropout_key})
+
+    logits = de_interleave(logits, 2*config.mu+1 if config.similarity_loss_on == "unlabeled" else 2*config.mu+2)
+    logits_x = logits[:batch_size]
+    logits_u_w, logits_u_s = jnp.array_split(logits[batch_size:], 2)
+
+    features = de_interleave(features, 2*config.mu+1 if config.similarity_loss_on == "unlabeled" else 2*config.mu+2)
+    features_x = logits[:batch_size]
+    features_u_w, features_u_s = jnp.array_split(logits[batch_size:], 2)
+
+    logits_x = jax.nn.log_softmax(logits_x)
+    logits_u_s = jax.nn.log_softmax(logits_u_s)
+
+    if config.similarity_loss_on == "unlabeled":
+      logits_input = (logits_x, logits_u_w, logits_u_s)
+      features_input = (features_x, features_u_w, features_u_s)
+    else:
+      labels = jnp.concatenate((labels, labels))
+      first_features, second_features = jnp.array_split(features_x, 2)
+
+      logits_input = (logits_x, logits_u_w, logits_u_s)
+      features_input = (first_features, second_features, features_u_w, features_u_s)
     
-    (second_features, second_logits), new_model_state = state.apply_fn(
-        {'params': params, 
-        'batch_stats': new_model_state["batch_stats"] if not config.no_second_step_bn_update else state.batch_stats},
-        second_images,
-        mutable=['batch_stats'], 
-        rngs={"dropout" : dropout_key})
-    
-    loss = criterion(first_logits, second_logits, first_features, second_features, first_labels,
-                     second_labels, both_branches_supervised=config.both_branches_supervised, 
-                     similarity_weight=tw, cross_entropy=cross_entropy, similarity=similarity, 
-                     loss_type=loss_type, label_smoothing=config.label_smoothing)
+    labels = jax.nn.one_hot(labels, config.num_classes, dtype=jnp.float32)
+
+    loss = criterion(logits_input, features_input, labels, similarity_weight=tw,
+                      loss_type=config.loss_type, similarity_loss_on=config.similarity_loss_on,
+                      temperature=config.temperature, threshold=config.threshold)
 
     weight_penalty_params = jax.tree_util.tree_leaves(params)
     weight_l2 = sum(jnp.sum(x ** 2)
@@ -267,7 +295,7 @@ def train_step(state, supervised_batch, unsupervised_batch, key, learning_rate_f
                      if x.ndim > 1)
     weight_penalty = config.weight_decay * 0.5 * weight_l2
     loss = loss + weight_penalty
-    return loss, (new_model_state, first_logits, first_features, second_logits, second_features)
+    return loss, (new_model_state, logits_x, labels, features_u_w, features_u_s, logits_u_w, logits_u_s)
    
   step = state.step
   dynamic_scale = state.dynamic_scale
@@ -284,8 +312,9 @@ def train_step(state, supervised_batch, unsupervised_batch, key, learning_rate_f
     grads = lax.pmean(grads, axis_name='batch')
     aux = aux[1]
         
-  new_model_state, first_logits, first_features, second_logits, second_features = aux
-  metrics = compute_train_metrics(first_logits, first_features, second_logits, second_features, batch['label'])
+  new_model_state, logits_x, labels, features_u_w, features_u_s, logits_u_w, logits_u_s = aux
+  metrics = compute_train_metrics(logits_x, labels, features_u_w, features_u_s, logits_u_w, logits_u_s)
+
   metrics['learning_rate'] = lr
 
   new_state = state.apply_gradients(
