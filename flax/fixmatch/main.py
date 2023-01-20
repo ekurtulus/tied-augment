@@ -65,7 +65,7 @@ flags.DEFINE_integer('log_every_steps', 100, 'log every steps')
 flags.DEFINE_boolean('cache', False, 'cache the dataset')
 flags.DEFINE_boolean('half_precision', False, 'use half precision')
 
-flags.DEFINE_integer('num_train_steps', -1, 'num train steps')
+flags.DEFINE_integer('num_train_steps', 2**20, 'num train steps')
 flags.DEFINE_integer('steps_per_eval', -1, 'steps per eval')
 
 flags.DEFINE_boolean('both_branches_supervised', True, 'whether to apply CE to both left and right branches')
@@ -76,8 +76,8 @@ flags.DEFINE_boolean('single_forward', False, 'whether single forward pass is do
 flags.DEFINE_boolean('no_second_step_bn_update', False, 'whether single forward pass is done instead of 2 forward passes')
     
 flags.DEFINE_string('supervised_transform', 'hflip', 'augmentation for the left branch')
-flags.DEFINE_string('unsupervised_transform_weak', 'hflip-randaug_n2_m14_p1', 'augmentation for the right branch') 
-flags.DEFINE_string('unsupervised_transform_strong', 'hflip-randaug_n2_m10_p.5', 'augmentation for the right branch') 
+flags.DEFINE_string('unsupervised_transform_weak', 'hflip', 'augmentation for the right branch') 
+flags.DEFINE_string('unsupervised_transform_strong', 'hflip-randaug_n2_m10_p.5-cutout_16', 'augmentation for the right branch') 
 
 flags.DEFINE_float('rho', 0, 'SAM rho (if 0, SAM is not applied)')
 flags.DEFINE_string('sam_first_step', 'ce-similarity', 'first step of sam')
@@ -91,6 +91,7 @@ flags.DEFINE_string("similarity_loss_on", "unlabeled", "apply supervised loss on
 flags.DEFINE_float("threshold", 0.95, "pseudolabel temperature")
 flags.DEFINE_float("temperature", 1, "temperature value") 
 flags.DEFINE_integer("mu", 7, "fixmatch mu")
+flags.DEFINE_integer("seed", 0, "random seed")
 
 
 def main(argv):

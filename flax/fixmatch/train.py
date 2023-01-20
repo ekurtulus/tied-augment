@@ -163,11 +163,16 @@ def cross_entropy_double(first_probs, second_probs, first_labels,
     return ce    
 
 def pseudolabel_loss(weak_logits, strong_logits, temperature, threshold):
-  pseudo_labels = jax.nn.softmax(jax.lax.stop_gradient(weak_logits)) / temperature
+  """pseudo_labels = jax.nn.softmax(jax.lax.stop_gradient(weak_logits)) / temperature
   max_probs = jnp.max(pseudo_labels, -1)
   labels_u = jnp.argmax(pseudo_labels, -1)
   mask = jnp.greater(max_probs, threshold).astype(jnp.float32)
   return jnp.mean(cross_entropy_loss(strong_logits, labels_u, reduction="none") * mask)
+  """
+  pseudo_labels = jax.lax.stop_gradient(jax.nn.softmax(weak_logits) / temperature)
+  pseudo_mask = (pseudo_labels.max(axis=-1) >= threshold).astype(weak_logits.dtype)
+  pseudo_labels = jax.nn.one_hot(jnp.argmax(pseudo_labels, -1), num_classes=weak_logits.shape[-1], dtype=weak_logits.dtype)
+  return jnp.mean(cross_entropy_loss(strong_logits, pseudo_labels, reduction="none") * pseudo_mask)
 
 def acc_topk(logits, labels, topk=(1,5)):
     top = lax.top_k(logits, max(topk))[1].transpose()
@@ -187,13 +192,13 @@ def compute_eval_metrics(logits, labels):
   metrics = lax.pmean(metrics, axis_name='batch')
   return metrics
 
-def compute_train_metrics(logits_x, labels, features_u_w, features_u_s, logits_u_w, logits_u_s):
+def compute_train_metrics(logits_x, labels, features_u_w, features_u_s, logits_u_w, logits_u_s, temperature=1, threshold=0.95):
   top_1, top_5 = acc_topk(logits_x, labels)
   metrics = {
     "top-1" : top_1,
     "top-5" : top_5,
-    "supervised_loss" : cross_entropy_loss(logits_x, labels),
-    "unsupervised_loss" : pseudolabel_loss(logits_u_w, logits_u_s),
+    "supervised_loss" : cross_entropy_loss(logits_x, jax.nn.one_hot(labels, logits_x.shape[-1], dtype=logits_x.dtype)),
+    "unsupervised_loss" : pseudolabel_loss(logits_u_w, logits_u_s, temperature, threshold),
     "unsupervised-l1" : l1_loss(features_u_w, features_u_s),
     "unsupervised-l2" : l2_loss(features_u_w, features_u_s),
     "unsupervised-cosine" : cosine_similarity(features_u_w, features_u_s),
@@ -214,7 +219,7 @@ def criterion(logits, features, labels, similarity_weight=1.0,
         similarity_fn = l2_loss
     elif loss_type == "l2_normalized":
         similarity_fn = l2_normalized
-
+    
     if similarity_loss_on == "labeled":
         (supervised, weak_unsupervised, strong_unsupervised) = logits
         (first_supervised_feat, second_supervised_feat, 
@@ -224,18 +229,17 @@ def criterion(logits, features, labels, similarity_weight=1.0,
         (supervised, weak_unsupervised, strong_unsupervised) = logits
         (_, first_unsupervised_feat, second_unsupervised_feat) = features
         sim_loss = similarity_fn(first_unsupervised_feat, second_unsupervised_feat) * similarity_weight       
-
     ce = cross_entropy_loss(supervised, labels) + pseudolabel_loss(weak_unsupervised, strong_unsupervised,
                                                                     temperature, threshold)
     return ce + sim_loss
 
 def interleave(x, size):
     s = list(x.shape)
-    return x.reshape([-1, size] + s[1:]).transpose(0, 1).reshape([-1] + s[1:])
+    return jnp.transpose(x.reshape([-1, size] + s[1:]), (1,0, 2,3,4)).reshape([-1] + s[1:])
 
 def de_interleave(x, size):
     s = list(x.shape)
-    return x.reshape([size, -1] + s[1:]).transpose(0, 1).reshape([-1] + s[1:])
+    return jnp.transpose(x.reshape([size, -1] + s[1:]), (1,0, 2)).reshape([-1] + s[1:])
 
 def train_step(state, supervised_batch, unsupervised_batch, key, learning_rate_fn, config, tw=-1, dropout_key=None):
   dropout_key = jax.random.fold_in(dropout_key, state.step)
@@ -248,7 +252,7 @@ def train_step(state, supervised_batch, unsupervised_batch, key, learning_rate_f
 
   weak_unsupervised, strong_unsupervised = unsupervised_batch["image1"], unsupervised_batch["image2"]
   inputs = interleave(jnp.concatenate((supervised_images, weak_unsupervised, strong_unsupervised)),
-                       2*config.mu+1 if config.labeled_loss_on == "unlabeled" else 2*config.mu+2)
+                       2*config.mu+1 if config.similarity_loss_on == "unlabeled" else 2*config.mu+2)
   
   batch_size = config.batch_size if config.similarity_loss_on == "unlabeled" else config.batch_size * 2
 
@@ -276,6 +280,7 @@ def train_step(state, supervised_batch, unsupervised_batch, key, learning_rate_f
     if config.similarity_loss_on == "unlabeled":
       logits_input = (logits_x, logits_u_w, logits_u_s)
       features_input = (features_x, features_u_w, features_u_s)
+      labels = supervised_batch["label"]
     else:
       labels = jnp.concatenate((labels, labels))
       first_features, second_features = jnp.array_split(features_x, 2)
@@ -283,6 +288,7 @@ def train_step(state, supervised_batch, unsupervised_batch, key, learning_rate_f
       logits_input = (logits_x, logits_u_w, logits_u_s)
       features_input = (first_features, second_features, features_u_w, features_u_s)
     
+    base_labels = labels
     labels = jax.nn.one_hot(labels, config.num_classes, dtype=jnp.float32)
 
     loss = criterion(logits_input, features_input, labels, similarity_weight=tw,
@@ -295,7 +301,7 @@ def train_step(state, supervised_batch, unsupervised_batch, key, learning_rate_f
                      if x.ndim > 1)
     weight_penalty = config.weight_decay * 0.5 * weight_l2
     loss = loss + weight_penalty
-    return loss, (new_model_state, logits_x, labels, features_u_w, features_u_s, logits_u_w, logits_u_s)
+    return loss, (new_model_state, logits_x, base_labels, features_u_w, features_u_s, logits_u_w, logits_u_s)
    
   step = state.step
   dynamic_scale = state.dynamic_scale
@@ -313,7 +319,8 @@ def train_step(state, supervised_batch, unsupervised_batch, key, learning_rate_f
     aux = aux[1]
         
   new_model_state, logits_x, labels, features_u_w, features_u_s, logits_u_w, logits_u_s = aux
-  metrics = compute_train_metrics(logits_x, labels, features_u_w, features_u_s, logits_u_w, logits_u_s)
+  metrics = compute_train_metrics(logits_x, labels, features_u_w, features_u_s, logits_u_w, logits_u_s, 
+                                 config.temperature, config.threshold)
 
   metrics['learning_rate'] = lr
 
@@ -642,7 +649,7 @@ def train_and_evaluate(config) -> TrainState:
       save_checkpoint(state, config.workdir)
 
   # Wait until computations are done before exiting
-  jax.random.normal(jax.random.PRNGKey(0), ()).block_until_ready()
+  jax.random.normal(jax.random.PRNGKey(config.seed), ()).block_until_ready()
 
   return state
     

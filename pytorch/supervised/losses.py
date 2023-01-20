@@ -267,7 +267,7 @@ def contrastive_handler(args):
         contrastive = VicReg(sim_loss_weight=args.vicreg_sim_weight,
                              var_loss_weight=args.vicreg_var_weight,
                              cov_loss_weight=args.vicreg_cov_weight,)    
-    return contrastive
+    return ContrastiveLayerwiseWrapper(args, contrastive)
 
         
 class CriterionHandler(nn.Module):

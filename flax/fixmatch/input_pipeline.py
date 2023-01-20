@@ -153,15 +153,19 @@ def preprocess_for_eval(image_bytes, dtype=tf.float32, image_size=IMAGE_SIZE, co
 
   return image
 
-def augmented_view(image, transform, image_size=IMAGE_SIZE, dtype=tf.float32,
-             config=None, cutout_size=-1):
+def augmented_view(image_bytes, transform, image_size=IMAGE_SIZE, dtype=tf.float32,
+             config=None, cutout_size=-1, no_decode=False):
+  
+  if not no_decode:
+    image = tf.image.decode_jpeg(image_bytes, 3)
+  else:
+    image = image_bytes
 
   image = tf.reshape(image, [image_size, image_size, 3])
   image = transform(tf.cast(image, tf.uint8))
   image = normalize_image(image, config.mean, config.std)
   image = tf.image.convert_image_dtype(image, dtype)
-  if cutout_size != -1:
-    image = augmentations.cutout(image, cutout_size)
+  image = tf.cond(tf.math.not_equal(cutout_size, -1), lambda: augmentations.cutout(image, cutout_size), lambda : image)
   return image
 
 
@@ -187,10 +191,10 @@ def two_augmented_views(image_bytes, first_transform, second_transform, dtype=tf
             second = first
 
     first = augmented_view(first, first_transform, image_size=image_size,
-                                    dtype=dtype, config=config, cutout_size=cutout_sizes[0])
+                                    dtype=dtype, config=config, cutout_size=cutout_sizes[0], no_decode=True)
 
     second = augmented_view(second, second_transform, image_size=image_size,
-                                    dtype=dtype, config=config, cutout_size=cutout_sizes[1])
+                                    dtype=dtype, config=config, cutout_size=cutout_sizes[1], no_decode=True)
     
     return first, second
     
@@ -235,9 +239,6 @@ def _create_dataset(dataset_builder, split, train, transform,
   options.experimental_threading.private_threadpool_size = 48
   ds = ds.with_options(options)
 
-  if cache:
-    ds = ds.cache()
-
   if train:
     ds = ds.repeat()
     ds = ds.shuffle(16 * batch_size, seed=0)
@@ -247,6 +248,9 @@ def _create_dataset(dataset_builder, split, train, transform,
 
   if not train:
     ds = ds.repeat()
+
+  if cache:
+    ds = ds.cache()
 
   ds = ds.prefetch(10)
   return ds
@@ -308,12 +312,13 @@ def create_split(dataset_builder, batch_size, train, dtype=tf.float32,
   else:
     supervised_transform = partial(augmented_view, transform=supervised_transform,
                                   image_size=config.image_size, dtype=dtype, config=config,
-                                  cutout_size=supervised_transform_cutout_size)
+                                  cutout_size=supervised_transform_cutout_size, no_decode=False)
 
   def decode_example(example, train_transform=None, single_image=False):
     if train and not single_image:
       image1, image2 = train_transform(example['image'], dtype=dtype, 
                                        image_size=config.image_size)
+      
       return {"image1" : image1, "image2" : image2, "label" : example["label"]}
     elif train and single_image:
       image = train_transform(example["image"], dtype=dtype, image_size=config.image_size)
@@ -324,11 +329,11 @@ def create_split(dataset_builder, batch_size, train, dtype=tf.float32,
 
   if train:
     supervised_dataset = _create_dataset(dataset_builder, supervised_split, train,
-                                         partial(decode_example, supervised_transform, single_image=config.similarity_loss_on=="labeled"), cache=cache,
+                                         partial(decode_example, train_transform=supervised_transform, single_image=config.similarity_loss_on!="labeled"), cache=cache,
                                          batch_size=batch_size)
 
     unsupervised_dataset = _create_dataset(dataset_builder, unsupervised_split, train,
-                                           partial(decode_example, unsupervised_transform), cache=cache,
+                                           partial(decode_example, train_transform=unsupervised_transform), cache=cache,
                                            batch_size=batch_size*config.mu)
     return supervised_dataset, unsupervised_dataset
   else:
