@@ -214,7 +214,7 @@ def jensen_shannon(first_logits, second_logits):
     return (first + second) / 2
     
 class SupervisedWrapper(nn.Module):
-    def __init__(self, criterion, divergence=False, divergence_weight=1, both_branches_supervised=False):
+    def __init__(self, criterion, divergence=False, divergence_weight=0, both_branches_supervised=False):
         super(SupervisedWrapper, self).__init__()
         self.criterion = criterion
         self.divergence = divergence
@@ -222,7 +222,7 @@ class SupervisedWrapper(nn.Module):
         self.both_branches_supervised = both_branches_supervised
         
     def forward(self, first_logits, second_logits, y):
-        if self.both_branches_supervised:
+        if self.both_branches_supervised and second_logits is not None:
             loss = self.criterion(torch.cat((first_logits, second_logits), 0), torch.cat((y,y), 0) )
         else:
             loss = self.criterion(first_logits, y)
@@ -327,10 +327,8 @@ class CriterionHandler(nn.Module):
 
         self.step += 1
         return similarity_weight
-
-        
     
-    def forward(self, first_logits, second_logits, first_features, second_features, y, ce=True, contrastive=True):
+    def forward(self, first_logits, second_logits, first_features, second_features, y, ce, contrastive):
         contrastive_weight = self.cosine_weight_handler()
         if ce and contrastive:
             return self.supervised(first_logits, second_logits, y) - self.contrastive_weight * self.contrastive(first_features, second_features)
@@ -338,4 +336,3 @@ class CriterionHandler(nn.Module):
             return self.supervised(first_logits, second_logits, y) 
         elif contrastive:
             return -self.contrastive_weight * self.contrastive(first_features, second_features)
-        

@@ -161,8 +161,7 @@ class ResnetWrapper(nn.Module):
         model.fc = nn.Linear(model.fc.in_features, num_classes)
         self.model = model
 
-    def _forward_impl(self, x):
-        # See note [TorchScript super()]
+    def forward(self, x, return_features=False):
         x = self.model.conv1(x)
         x = self.model.bn1(x)
         x = self.model.relu(x)
@@ -176,20 +175,16 @@ class ResnetWrapper(nn.Module):
         x = self.model.avgpool(x)
         features = torch.flatten(x, 1)
         x = self.model.fc(features)
-        if self.training:
+        if self.training or return_features:
             return features, x
         else:
             return x
         
-    def forward(self, x):
-        return self._forward_impl(x)
-    
-
 def create_model(args):
     if args.model == "wide-resnet":
-        model = WideResNet(args.resnet_depth, args.num_classes, widen_factor=args.resnet_width, dropRate=args.dropout)
+        model = WideResNet(args.resnet_depth, args.num_classes, widen_factor=args.resnet_width, dropRate=args.dropout).train()
     else:
-        model = ResnetWrapper(models.resnet50(pretrained=True), args.num_classes)
+        model = ResnetWrapper(models.resnet50(pretrained=True), args.num_classes).train()
         #model = TimmWrapper(timm.create_model(args.model, num_classes=0, pretrained=True), args.num_classes)
             
     if args.freeze_layers:

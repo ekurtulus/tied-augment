@@ -71,7 +71,7 @@ def predict(model, dataset, device=torch.device("cuda:0"), halftensor=False, ret
                 features.append(feat.cpu())
             else:
                 out = model(x)
-            
+
             outputs.append(out.cpu())
             softmax_outputs.append(torch.softmax(out, 1).cpu() )
             loss += criterion(out, y.to(device)).cpu().item()
@@ -121,7 +121,6 @@ def calculate_accuracy(preds, labels, strategy, num_classes):
             trues[i] += correct
             falses[i] += (num_examples - correct)        
             
-        print("Trues : ", trues, " falses : ", falses, flush=True ) 
         return (trues / (trues + falses)).mean().item() * 100
     
 def all_evaluate(model, train_set, test_set, robustness_data_path, mean, std, device=torch.device("cuda:0"), halftensor=False, c_evaluation=False, strategy="top-1", num_classes=None):
@@ -230,7 +229,6 @@ class RunningEvaluator:
            
 
     def compute(self, reset=False):
-        print("Trues : ", self.trues, " falses : ", self.falses, flush=True ) 
         acc = self.trues / (self.trues + self.falses)
         if self.strategy == "per-class-mean":
             acc = acc.mean()
