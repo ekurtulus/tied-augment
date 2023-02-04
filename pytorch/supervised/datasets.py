@@ -1,9 +1,10 @@
 import torch
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, Subset
 from torchvision import datasets, transforms as T
 from functools import partial
 from augmentations import *
 from math import ceil
+from PIL import Image
 
 _IMAGENET_MEAN = torch.tensor([0.485, 0.456, 0.406])
 _IMAGENET_STD = torch.tensor([0.229, 0.224, 0.225])
@@ -36,7 +37,54 @@ def reduced_cifar(root, cifar_type, num_labels, train=False, transform=None):
     
     return data
     
+class BasicDataset(Dataset):
+    def __init__(self, x, y, load_image=False):
+        self.x = x
+        self.y = y
+        self.load_image = load_image
+    
+    def __len__(self):
+        return len(self.x)
+    
+    def __getitem__(self, idx):
+        if self.load_image:
+            return Image.open(self.x[idx]), self.y[idx]
+        else:
+            return self.x[idx], self.y[idx]
+    
+def sun397(root, split="train", transform=None, index="01"):
+    
+    label_list = {i.strip() : idx for idx, i in enumerate(open(os.path.join(root, "SUN397", "ClassName.txt")).read().splitlines()[:397] ) }
+    images = open(os.path.join(root, "SUN397", "Testing_" + SUN397Index + ".txt" if split == "val" else "Training_" + SUN397Index + ".txt")).read().splitlines()
+    
+    x,y = [], []
+    for image in images:
+        class_part = "/".join(image.split(".jpg")[0].split("/")[:-1])
+        x.append(os.path.join(root, "SUN397", image[1:] ) )
+        y.append(label_list[class_part])
+    
+    return BasicDataset(x,y, load_image=True)
+    
+    
+def caltech101(root, split="train", transform=None, permutation_tensor=None):
+    dataset = datasets.Caltech101(root, transform=transform)
+    sampled_count = [0] * 101
+    train_indices, val_indices = [], []
+    
+    for idx in torch.arange(len(dataset))[permutation_tensor].numpy():
+        x,y = dataset[idx]
+        if sampled_count[y] < 30:
+            train_indices.append(idx)
+        else:
+            test_indices.append(idx)
 
+    return torch.utils.data.Subset(dataset, test_indices if split == "val" else train_indices)
+    
+
+def _index_sun397():
+    idx = str(np.random.randint(1,11))
+    return "0" * (2 - len(idx) ) + idx
+    
 DATASETS = {
     "cifar10" : {
         "dataset_function" : datasets.CIFAR10,
@@ -160,19 +208,24 @@ DATASETS = {
         "split_args" : {"train" : {"split" : "train"}, "test" : {"split" : "val"}},
         "evaluation_strategy" : "top-1"
     },    
+    "caltech101" : {
+        "dataset_function" : partial(caltech101, permutation_tensor=torch.randperm(8677) ) ,
+        "mean" : _IMAGENET_MEAN,
+        "std" : _IMAGENET_STD,
+        "num_classes" : 101,
+        "split_args" : {"train" : {"split" : "train"}, "test" : {"split" : "val"}},
+        "evaluation_strategy" : "top-1"
+    },
+    "sun397" : {
+        "dataset_function" : partial(sun397, index=_index_sun397()),
+        "mean" : _IMAGENET_MEAN,
+        "std" : _IMAGENET_STD,
+        "num_classes" : 397,
+        "split_args" : {"train" : {"split" : "train"}, "test" : {"split" : "val"}},
+        "evaluation_strategy" : "top-1"
+    },
+        
 }
-
-class BasicDataset(Dataset):
-    def __init__(self, x, y):
-        self.x = x
-        self.y = y
-    
-    def __len__(self):
-        return len(self.x)
-    
-    def __getitem__(self, idx):
-        return self.x[idx], self.y[idx]
-
 
 def _remove_crop_hflip(transform):
     temp = []

@@ -46,12 +46,10 @@ import warnings
 from typing import Any, Callable, Dict, List, Optional, Tuple
 import flax.serialization as serialization
 import flax.struct as struct
+from flax import traverse_util
+from flax.core.frozen_dict import freeze
 
-"""
-TODO:
-- EMA
-- label smoothing
-"""
+
 def create_model(*, model_cls, half_precision, num_classes, **kwargs):
   platform = jax.local_devices()[0].platform
   if half_precision:
@@ -64,13 +62,16 @@ def create_model(*, model_cls, half_precision, num_classes, **kwargs):
   return model_cls(num_classes=num_classes, dtype=model_dtype, **kwargs)
 
 
-def initialized(keys, image_size, model):
+def initialized(keys, image_size, model, config):
   input_shape = (2, image_size, image_size, 3)
   @jax.jit
   def init(*args):
     return model.init(*args)
   variables = init({'params': keys[0], 'dropout' : keys[1]}, jnp.ones(input_shape, model.dtype))
-  return variables['params'], variables['batch_stats']
+  if "VIT" in config.model:
+    return variables['params'], {}
+  else:
+    return variables['params'], variables['batch_stats']
  
 def l2_loss(first_features, second_features):
     return jnp.mean((first_features - second_features) ** 2)
@@ -144,7 +145,7 @@ def acc_topk(logits, labels, topk=(1,5)):
     correct = top == labels.reshape(1, -1)
     return [correct[:k].reshape(-1).sum(axis=0) * 100 / labels.shape[0] for k in topk]
 
-def compute_eval_metrics(logits, features, labels):
+def compute_eval_metrics(logits, labels):
   loss = cross_entropy_loss(jax.nn.log_softmax(logits.astype(jnp.float32)), 
                             jax.nn.one_hot(labels, logits.shape[-1], dtype=jnp.float32))  
   
@@ -377,20 +378,19 @@ def train_step(state, batch, key, learning_rate_fn, config, tw=-1, dropout_key=N
   logging.info("train step compiled ! ")
   return new_state, metrics
 
-
 def eval_step(state, batch):
   variables = {'params': state.params, 'batch_stats' : state.batch_stats}
   features, logits = state.apply_fn(
       variables, batch['image'], train=False, mutable=False)
   logging.info("eval step compiled ! ")
-  return compute_eval_metrics(logits, features, batch['label'])
+  return compute_eval_metrics(logits, batch['label'])
 
 def eval_step_ema(state, batch):
   variables = {'params': state.ema.params, 'batch_stats' : state.ema.batch_stats}
   features, logits = state.apply_fn(
       variables, batch['image'], train=False, mutable=False)
   logging.info("eval step compiled ! ")
-  return compute_eval_metrics(logits, features, batch['label'])  
+  return compute_eval_metrics(logits, batch['label'])  
 
 def prepare_tf_data(xs):
   """Convert a input batch from tf Tensors to numpy arrays."""
@@ -415,15 +415,12 @@ def create_input_iter(dataset_builder, batch_size, image_size, dtype, train,
   it = jax_utils.prefetch_to_device(it, 2)
   return it
 
-
 class TrainState(train_state.TrainState):
   batch_stats: Any
   dynamic_scale: dynamic_scale_lib.DynamicScale
 
-
 def restore_checkpoint(state, workdir):
   return checkpoints.restore_checkpoint(workdir, state)
-
 
 def save_checkpoint(state, workdir):
   if jax.process_index() == 0:
@@ -432,11 +429,9 @@ def save_checkpoint(state, workdir):
     step = int(state.step)
     checkpoints.save_checkpoint(workdir, state, step, keep=3)
 
-
 # pmean only works inside pmap because it needs an axis name.
 # This function will average the inputs across all devices.
 cross_replica_mean = jax.pmap(lambda x: lax.pmean(x, 'x'), 'x')
-
 
 def sync_batch_stats(state):
   """Sync the batch statistics across replicas."""
@@ -484,12 +479,18 @@ def create_train_state(rng, config, model, image_size, learning_rate_fn):
   else:
     dynamic_scale = None
 
-  params, batch_stats = initialized(rng, image_size, model)
+  params, batch_stats = initialized(rng, image_size, model, config)
   tx = optax.sgd(
       learning_rate=learning_rate_fn,
       momentum=config.momentum,
       nesterov=True,
-  )
+  )  
+  if config.finetuning_checkpoint is not None and config.linear_eval:
+    partition_optimizers = {'trainable': tx, 'frozen': optax.set_to_zero()}
+    param_partitions = freeze(traverse_util.path_aware_map(
+        lambda path, v: 'trainable' if 'fc' in path else 'frozen', params))
+    tx = optax.multi_transform(partition_optimizers, param_partitions)
+
   state = TrainStateExtended.create(
       apply_fn=model.apply,
       params=params,
@@ -535,18 +536,58 @@ def train_and_evaluate(config) -> TrainState:
   DATASETS = {
     "imagenet2012" : {"num_classes" : 1000, "default_image_size" : 224, 
                       "mean" : IMAGENET_MEAN, 
-                      "std" : IMAGENET_STD},
+                      "std" : IMAGENET_STD,
+                      "dataset_name" : "imagenet2012"},
     "cifar10" : {"num_classes" : 10, "default_image_size" : 32, 
                  "mean" : [0.4914 * 255, 0.4822 * 255, 0.4465 * 255], 
-                 "std" : [0.2475 * 255, 0.2435 * 255, 0.2615 * 255]},
-      
+                 "std" : [0.2475 * 255, 0.2435 * 255, 0.2615 * 255],
+                 "dataset_name" : "cifar10"},
     "cifar100" : {"num_classes" : 100, "default_image_size" : 32, 
                   "mean" : [0.5070 * 255, 0.4865 * 255, 0.4409 * 255], 
-                  "std" : [0.2673 * 255, 0.2564 * 255, 0.2761 * 255]},
+                  "std" : [0.2673 * 255, 0.2564 * 255, 0.2761 * 255],
+                  "dataset_name" : "cifar100"},
     "svhn_cropped" : {"num_classes" : 10, "default_image_size" : 32, 
                   "mean" : [0.4309 * 255, 0.4302 * 255, 0.4463 * 255], 
-                  "std" : [0.1975 * 255, 0.2002 * 255, 0.1981 * 255]},    
+                  "std" : [0.1975 * 255, 0.2002 * 255, 0.1981 * 255],
+                  "dataset_name" : "svhn_cropped"},    
+     "flowers" : {"num_classes" : 102, "default_image_size" : 224, 
+                      "mean" : IMAGENET_MEAN, 
+                      "std" : IMAGENET_STD, 
+                      "dataset_name" : "oxford_flowers102"},
+     "caltech101" : {"num_classes" : 101, "default_image_size" : 224, 
+                      "mean" : IMAGENET_MEAN, 
+                      "std" : IMAGENET_STD, 
+                      "dataset_name" : "caltech101"},
+     "pets" : {"num_classes" : 37, "default_image_size" : 224, 
+                      "mean" : IMAGENET_MEAN, 
+                      "std" : IMAGENET_STD, 
+                      "dataset_name" : "oxford_iiit_pets"},
+     "sun397" : {"num_classes" : 397, "default_image_size" : 224, 
+                      "mean" : IMAGENET_MEAN, 
+                      "std" : IMAGENET_STD,
+                      "dataset_name" : "sun397"},
+     "stanford-cars" : {"num_classes" : 196, "default_image_size" : 224, 
+                      "mean" : IMAGENET_MEAN, 
+                      "std" : IMAGENET_STD,
+                      "dataset_name" : "cars196"},
+     "dtd" : {"num_classes" : 47, "default_image_size" : 224, 
+                      "mean" : IMAGENET_MEAN, 
+                      "std" : IMAGENET_STD,
+                      "dataset_name" : "dtd"},
+     "food101" : {"num_classes" : 101, "default_image_size" : 224, 
+                      "mean" : IMAGENET_MEAN, 
+                      "std" : IMAGENET_STD,
+                      "dataset_name" : "food101"},
+      "cifar10_finetune" :{"num_classes" : 10, "default_image_size" : 224, 
+                      "mean" : IMAGENET_MEAN, 
+                      "std" : IMAGENET_STD,
+                      "dataset_name" : "cifar10"},
+      "cifar100_finetune" : {"num_classes" : 100, "default_image_size" : 224, 
+                      "mean" : IMAGENET_MEAN, 
+                      "std" : IMAGENET_STD,
+                      "dataset_name" : "cifar100"},   
   }
+
   if config.dataset in DATASETS:
     dataset_config = DATASETS[config.dataset]
   else:
@@ -556,9 +597,9 @@ def train_and_evaluate(config) -> TrainState:
   config.mean = dataset_config["mean"] if config.mean == [-1, -1, -1] else config.mean
   config.std = dataset_config["std"]  if config.std == [-1, -1, -1] else config.std
   config.num_classes = dataset_config["num_classes"] if config.num_classes == -1 else config.num_classes
-  config.image_size = dataset_config["default_image_size"] if config.image_size == -1 else config.image_size
-  
-  dataset_builder = tfds.builder(config.dataset)
+  config.image_size = dataset_config["default_image_size"] if config.image_size == -1 else config.image_size 
+
+  dataset_builder = tfds.builder(dataset_config["dataset_name"])
   dataset_builder.download_and_prepare()
 
   train_iter = create_input_iter(
@@ -579,14 +620,15 @@ def train_and_evaluate(config) -> TrainState:
 
   if config.steps_per_eval == -1:
     num_validation_examples = dataset_builder.info.splits[
-        'validation' if config.dataset not in ["cifar10", "cifar100", "svhn_cropped"] else 'test'].num_examples
+        'test' if config.dataset in ["cifar10", "cifar100", "svhn_cropped", 
+                                              "cifar10_finetune", "cifar100_finetune"] else 'validation'].num_examples
     steps_per_eval = num_validation_examples // config.batch_size
   else:
     steps_per_eval = config.steps_per_eval
 
   steps_per_checkpoint = steps_per_epoch * 10
   
-  if config.dataset not in ["cifar10", "cifar100", "svhn_cropped"]:
+  if config.dataset == "imagenet2012":
     base_learning_rate = config.learning_rate * (config.batch_size / 256.)
   else:
     base_learning_rate = config.learning_rate
@@ -607,7 +649,14 @@ def train_and_evaluate(config) -> TrainState:
     rng, key = jax.random.split(rng)
 
   state = create_train_state((params_rng, dropout_rng), config, model, config.image_size, learning_rate_fn)
-  state = restore_checkpoint(state, config.workdir)
+  if config.finetuning_checkpoint is not None:
+    temp_state = create_train_state((params_rng, dropout_rng), config, model, config.image_size, learning_rate_fn)
+    temp_state = restore_checkpoint(temp_state, config.finetuning_checkpoint)
+    params = temp_state.params
+    state = state.replace(params=params)
+
+  state = restore_checkpoint(state, config.workdir)  
+
   # step_offset > 0 if restarting from checkpoint
   step_offset = int(state.step)
   state = jax_utils.replicate(state)

@@ -83,6 +83,8 @@ flags.DEFINE_string('sam_first_step', 'ce-similarity', 'first step of sam')
 flags.DEFINE_string('sam_second_step', 'ce-similarity', 'second step of sam')
 
 flags.DEFINE_float('mixup_alpha', 0.0, 'mixup alpha (if 0, no mixup is applied')
+flags.DEFINE_string('finetuning_checkpoint', None, 'finetuning checkpoint to load from if the task is finetuning')
+flags.DEFINE_boolean('linear_eval', False, 'if finetuning, use linear eval if true else full fine-tuning')
 
 def main(argv):
   if len(argv) > 1:

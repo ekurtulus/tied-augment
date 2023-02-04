@@ -24,6 +24,7 @@ import jax
 from flax import linen as nn
 import jax.numpy as jnp
 from jax.nn import initializers
+import numpy as np
 
 ModuleDef = Any
 
@@ -135,7 +136,7 @@ class ResNet(nn.Module):
                            norm=norm,
                            act=self.act)(x)
     out = jnp.mean(x, axis=(1, 2))
-    x = nn.Dense(self.num_classes, dtype=self.dtype)(out)
+    x = nn.Dense(self.num_classes, name="fc", dtype=self.dtype)(out)
     
     out = jnp.asarray(out, self.dtype)
     x = jnp.asarray(x, self.dtype)
@@ -210,7 +211,7 @@ class WideResNet(nn.Module):
         x = norm()(x)
         x = nn.relu(x)
         features = jnp.mean(x, axis=(-3, -2))
-        logits = nn.Dense(self.num_classes, kernel_init=nn.initializers.glorot_normal())(features)
+        logits = nn.Dense(self.num_classes, name="fc", kernel_init=nn.initializers.glorot_normal())(features)
         return features, logits
 
 
@@ -263,10 +264,6 @@ WRN37_10_SBN = partial(WideResNet, depth=37, width=10, split_batchnorm=True)
 WRN40_2_SBN = partial(WideResNet, depth=40, width=2, split_batchnorm=True)
 WRN40_10_SBN = partial(WideResNet, depth=40, width=10, split_batchnorm=True)
 
-# Used for testing only.
-_ResNet1 = partial(ResNet, stage_sizes=[1], block_cls=ResNetBlock)
-_ResNet1Local = partial(ResNet, stage_sizes=[1], block_cls=ResNetBlock,
-                        conv=nn.ConvLocal)
 
 
 
@@ -665,7 +662,7 @@ class ResNetRS(nn.Module):
             )(x, train) 
         features = jnp.mean(x, axis=(1,2))  # global average pooling
         x = nn.Dropout(self.dropout_rate, deterministic=not train, name="top_dropout")(features)
-        x = nn.Dense(self.num_classes, name="predictions", dtype=self.dtype)(x)
+        x = nn.Dense(self.num_classes, name="fc", dtype=self.dtype)(x)
         x = nn.softmax(x)
         return features, x
 
@@ -677,109 +674,220 @@ ResNetRS270 = partial(ResNetRS, block_args=BLOCK_ARGS[270], drop_connect_rate=0.
 ResNetRS350 = partial(ResNetRS, block_args=BLOCK_ARGS[350], drop_connect_rate=0.1, dropout_rate=0.4)
 ResNetRS420 = partial(ResNetRS, block_args=BLOCK_ARGS[420], drop_connect_rate=0.1, dropout_rate=0.4)
 
-"""
-class ResNetRS50(nn.Module):
-    classes: int = 1000
-    dtype: Any = jnp.float32
+def posemb_sincos_2d(h, w, width, temperature=10_000., dtype=jnp.float32):
+  """Follows the MoCo v3 logic."""
+  y, x = jnp.mgrid[:h, :w]
 
-    @nn.compact
-    def __call__(self, x, train=True):
-        return ResNetRS(
-            self.classes,
-            BLOCK_ARGS[50],
-            drop_connect_rate=0.0,
-            dropout_rate=0.25,
-            dtype=self.dtype,
-        )(x, train)
+  assert width % 4 == 0, "Width must be mult of 4 for sincos posemb"
+  omega = jnp.arange(width // 4) / (width // 4 - 1)
+  omega = 1. / (temperature**omega)
+  y = jnp.einsum("m,d->md", y.flatten(), omega)
+  x = jnp.einsum("m,d->md", x.flatten(), omega)
+  pe = jnp.concatenate([jnp.sin(x), jnp.cos(x), jnp.sin(y), jnp.cos(y)], axis=1)
+  return jnp.asarray(pe, dtype)[None, :, :]
 
 
-class ResNetRS101(nn.Module):
-    classes: int = 1000
-    dtype: Any = jnp.float32
-
-    @nn.compact
-    def __call__(self, x, train=True):
-        return ResNetRS(
-            self.classes,
-            BLOCK_ARGS[101],
-            drop_connect_rate=0.0,
-            dropout_rate=0.25,
-            dtype=self.dtype,
-        )(x, train)
+def get_posemb(self, typ, seqshape, width, name, dtype=jnp.float32):
+  if typ == "learn":
+    return self.param(name, nn.initializers.normal(stddev=1/np.sqrt(width)),
+                      (1, np.prod(seqshape), width), dtype)
+  elif typ == "sincos2d":
+    return posemb_sincos_2d(*seqshape, width, dtype=dtype)
+  else:
+    raise ValueError(f"Unknown posemb type: {typ}")
 
 
-class ResNetRS152(nn.Module):
-    classes: int = 1000
-    dtype: Any = jnp.float32
+class MlpBlock(nn.Module):
+  """Transformer MLP / feed-forward block."""
+  mlp_dim: Optional[int] = None  # Defaults to 4x input dim
+  dropout: float = 0.0
 
-    @nn.compact
-    def __call__(self, x, train=True):
-        return ResNetRS(
-            self.classes,
-            BLOCK_ARGS[152],
-            drop_connect_rate=0.0,
-            dropout_rate=0.25,
-            dtype=self.dtype,
-        )(x, train)
+  @nn.compact
+  def __call__(self, x, deterministic=True):
+    """Applies Transformer MlpBlock module."""
+    inits = dict(
+        kernel_init=nn.initializers.xavier_uniform(),
+        bias_init=nn.initializers.normal(stddev=1e-6),
+    )
 
-
-class ResNetRS200(nn.Module):
-    classes: int = 1000
-    dtype: Any = jnp.float32
-
-    @nn.compact
-    def __call__(self, x, train=True):
-        return ResNetRS(
-            self.classes,
-            BLOCK_ARGS[200],
-            drop_connect_rate=0.1,
-            dropout_rate=0.25,
-            dtype=self.dtype,
-        )(x, train)
+    n, l, d = x.shape  # pylint: disable=unused-variable
+    x = nn.Dense(self.mlp_dim or 4 * d, **inits)(x)
+    x = nn.gelu(x)
+    x = nn.Dropout(rate=self.dropout)(x, deterministic)
+    x = nn.Dense(d, **inits)(x)
+    return x
 
 
-class ResNetRS270(nn.Module):
-    classes: int = 1000
-    dtype: Any = jnp.float32
+class Encoder1DBlock(nn.Module):
+  """Single transformer encoder block (MHSA + MLP)."""
+  mlp_dim: Optional[int] = None  # Defaults to 4x input dim
+  num_heads: int = 12
+  dropout: float = 0.0
 
-    @nn.compact
-    def __call__(self, x, train=True):
-        return ResNetRS(
-            self.classes,
-            BLOCK_ARGS[270],
-            drop_connect_rate=0.1,
-            dropout_rate=0.25,
-            dtype=self.dtype,
-        )(x, train)
+  @nn.compact
+  def __call__(self, x, deterministic=True):
+    out = {}
+    y = nn.LayerNorm()(x)
+    y = out["sa"] = nn.MultiHeadDotProductAttention(
+        num_heads=self.num_heads,
+        kernel_init=nn.initializers.xavier_uniform(),
+        deterministic=deterministic,
+    )(y, y)
+    y = nn.Dropout(rate=self.dropout)(y, deterministic)
+    x = out["+sa"] = x + y
 
-
-class ResNetRS350(nn.Module):
-    classes: int = 1000
-    dtype: Any = jnp.float32
-
-    @nn.compact
-    def __call__(self, x, train=True):
-        return ResNetRS(
-            self.classes,
-            BLOCK_ARGS[350],
-            drop_connect_rate=0.1,
-            dropout_rate=0.4,
-            dtype=self.dtype,
-        )(x, train)
+    y = nn.LayerNorm()(x)
+    y = out["mlp"] = MlpBlock(
+        mlp_dim=self.mlp_dim, dropout=self.dropout,
+    )(y, deterministic)
+    y = nn.Dropout(rate=self.dropout)(y, deterministic)
+    x = out["+mlp"] = x + y
+    return x, out
 
 
-class ResNetRS420(nn.Module):
-    classes: int = 1000
-    dtype: Any = jnp.float32
+class Encoder(nn.Module):
+  """Transformer Model Encoder for sequence to sequence translation."""
+  depth: int
+  mlp_dim: Optional[int] = None  # Defaults to 4x input dim
+  num_heads: int = 12
+  dropout: float = 0.0
 
-    @nn.compact
-    def __call__(self, x, train=True):
-        return ResNetRS(
-            self.classes,
-            BLOCK_ARGS[420],
-            drop_connect_rate=0.1,
-            dropout_rate=0.4,
-            dtype=self.dtype,
-        )(x, train)
-"""
-    
+  @nn.compact
+  def __call__(self, x, deterministic=True):
+    out = {}
+
+    # Input Encoder
+    for lyr in range(self.depth):
+      block = Encoder1DBlock(
+          name=f"encoderblock_{lyr}",
+          mlp_dim=self.mlp_dim, num_heads=self.num_heads, dropout=self.dropout)
+      x, out[f"block{lyr:02d}"] = block(x, deterministic)
+    out["pre_ln"] = x  # Alias for last block, but without the number in it.
+
+    return nn.LayerNorm(name="encoder_norm")(x), out
+
+
+class MAPHead(nn.Module):
+  """Multihead Attention Pooling."""
+  mlp_dim: Optional[int] = None  # Defaults to 4x input dim
+  num_heads: int = 12
+
+  @nn.compact
+  def __call__(self, x):
+    # TODO
+    n, l, d = x.shape  # pylint: disable=unused-variable
+    probe = self.param("probe", nn.initializers.xavier_uniform(),
+                       (1, 1, d), x.dtype)
+    probe = jnp.tile(probe, [n, 1, 1])
+
+    x = nn.MultiHeadDotProductAttention(
+        num_heads=self.num_heads,
+        kernel_init=nn.initializers.xavier_uniform())(probe, x)
+
+    # TODO: dropout on head?
+    y = nn.LayerNorm()(x)
+    x = x + MlpBlock(mlp_dim=self.mlp_dim)(y)
+    return x[:, 0]
+
+
+class VITModel(nn.Module):
+  """ViT model."""
+
+  num_classes: Optional[int] = None
+  patch_size: Sequence[int] = (16, 16)
+  width: int = 768
+  depth: int = 12
+  mlp_dim: Optional[int] = None  # Defaults to 4x input dim
+  num_heads: int = 12
+  posemb: str = "learn"  # Can also be "sincos2d"
+  rep_size: Union[int, bool] = False
+  dropout: float = 0.0
+  pool_type: str = "gap"  # Can also be "map" or "tok"
+  head_zeroinit: bool = True
+  dtype: Any = jnp.float32
+
+  @nn.compact
+  def __call__(self, image, *, train=False):
+    out = {}
+
+    # Patch extraction
+    x = out["stem"] = nn.Conv(
+        self.width, self.patch_size, strides=self.patch_size,
+        padding="VALID", name="embedding")(image)
+
+    n, h, w, c = x.shape
+    x = jnp.reshape(x, [n, h * w, c])
+
+    # Add posemb before adding extra token.
+    x = out["with_posemb"] = x + get_posemb(
+        self, self.posemb, (h, w), c, "pos_embedding", x.dtype)
+
+    if self.pool_type == "tok":
+      cls = self.param("cls", nn.initializers.zeros, (1, 1, c), x.dtype)
+      x = jnp.concatenate([jnp.tile(cls, [n, 1, 1]), x], axis=1)
+
+    n, l, c = x.shape  # pylint: disable=unused-variable
+    x = nn.Dropout(rate=self.dropout)(x, not train)
+
+    x, out["encoder"] = Encoder(
+        depth=self.depth,
+        mlp_dim=self.mlp_dim,
+        num_heads=self.num_heads,
+        dropout=self.dropout,
+        name="Transformer")(
+            x, deterministic=not train)
+    encoded = out["encoded"] = x
+
+    if self.pool_type == "map":
+      x = out["head_input"] = MAPHead(
+          num_heads=self.num_heads, mlp_dim=self.mlp_dim)(x)
+    elif self.pool_type == "gap":
+      x = out["head_input"] = jnp.mean(x, axis=1)
+    elif self.pool_type == "0":
+      x = out["head_input"] = x[:, 0]
+    elif self.pool_type == "tok":
+      x = out["head_input"] = x[:, 0]
+      encoded = encoded[:, 1:]
+    else:
+      raise ValueError(f"Unknown pool type: '{self.pool_type}'")
+
+    x_2d = jnp.reshape(encoded, [n, h, w, -1])
+
+    if self.rep_size:
+      rep_size = self.width if self.rep_size is True else self.rep_size
+      hid = nn.Dense(rep_size, name="pre_logits")
+      # NOTE: In the past we did not include tanh in pre_logits.
+      # For few-shot, it should not matter much, as it whitens anyways.
+      x_2d = nn.tanh(hid(x_2d))
+      x = nn.tanh(hid(x))
+
+    out["pre_logits_2d"] = x_2d
+    out["pre_logits"] = x
+
+    if self.num_classes:
+      kw = {"kernel_init": nn.initializers.zeros} if self.head_zeroinit else {}
+      head = nn.Dense(self.num_classes, name="fc", **kw)
+      x_2d = out["logits_2d"] = head(x_2d)
+      x = out["logits"] = head(x)
+
+    return out["pre_logits"], x
+
+VIT_T_16 = partial(VITModel, width=192, depth=12, mlp_dim=768, num_heads=3, patch_size=(16, 16))
+VIT_S_16 = partial(VITModel, width=384, depth=12, mlp_dim=1536, num_heads=6, patch_size=(16, 16))
+VIT_M_16 = partial(VITModel, width=512, depth=12, mlp_dim=2048, num_heads=8, patch_size=(16, 16))
+VIT_B_16 = partial(VITModel, width=768, depth=12, mlp_dim=3072, num_heads=12, patch_size=(16, 16))
+VIT_L_16 = partial(VITModel, width=1024, depth=24, mlp_dim=4096, num_heads=16, patch_size=(16, 16))
+VIT_H_16 = partial(VITModel, width=1280, depth=32, mlp_dim=5120, num_heads=16, patch_size=(16, 16))
+VIT_g_16 = partial(VITModel, width=1408, depth=40, mlp_dim=6144, num_heads=16, patch_size=(16, 16))
+VIT_G_16 = partial(VITModel, width=1664, depth=48, mlp_dim=8192, num_heads=16, patch_size=(16, 16))
+VIT_e_16 = partial(VITModel, width=1792, depth=56, mlp_dim=15360, num_heads=16, patch_size=(16, 16))
+
+VIT_T_32 = partial(VITModel, width=192, depth=12, mlp_dim=768, num_heads=3, patch_size=(32,32))
+VIT_S_32 = partial(VITModel, width=384, depth=12, mlp_dim=1536, num_heads=6, patch_size=(32,32))
+VIT_M_32 = partial(VITModel, width=512, depth=12, mlp_dim=2048, num_heads=8, patch_size=(32,32))
+VIT_B_32 = partial(VITModel, width=768, depth=12, mlp_dim=3072, num_heads=12, patch_size=(32,32))
+VIT_L_32 = partial(VITModel, width=1024, depth=24, mlp_dim=4096, num_heads=16, patch_size=(32,32))
+VIT_H_32 = partial(VITModel, width=1280, depth=32, mlp_dim=5120, num_heads=16, patch_size=(32,32))
+VIT_g_32 = partial(VITModel, width=1408, depth=40, mlp_dim=6144, num_heads=16, patch_size=(32,32))
+VIT_G_32 = partial(VITModel, width=1664, depth=48, mlp_dim=8192, num_heads=16, patch_size=(32,32))
+VIT_e_32 = partial(VITModel, width=1792, depth=56, mlp_dim=15360, num_heads=16, patch_size=(32,32))
