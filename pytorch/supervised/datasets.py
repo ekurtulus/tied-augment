@@ -38,24 +38,29 @@ def reduced_cifar(root, cifar_type, num_labels, train=False, transform=None):
     return data
     
 class BasicDataset(Dataset):
-    def __init__(self, x, y, load_image=False):
+    def __init__(self, x, y, load_image=False, transform=None):
         self.x = x
         self.y = y
         self.load_image = load_image
+        self.transform = transform
     
     def __len__(self):
         return len(self.x)
     
     def __getitem__(self, idx):
         if self.load_image:
-            return Image.open(self.x[idx]), self.y[idx]
+            x,y = Image.open(self.x[idx]).convert("RGB"), self.y[idx]
         else:
-            return self.x[idx], self.y[idx]
+            x,y = self.x[idx], self.y[idx]
+        if self.transform is not None:
+            x = self.transform(x)
+        return x, y
+        
     
 def sun397(root, split="train", transform=None, index="01"):
     
     label_list = {i.strip() : idx for idx, i in enumerate(open(os.path.join(root, "SUN397", "ClassName.txt")).read().splitlines()[:397] ) }
-    images = open(os.path.join(root, "SUN397", "Testing_" + SUN397Index + ".txt" if split == "val" else "Training_" + SUN397Index + ".txt")).read().splitlines()
+    images = open(os.path.join(root, "SUN397", "Testing_" + index + ".txt" if split == "val" else "Training_" + index + ".txt")).read().splitlines()
     
     x,y = [], []
     for image in images:
@@ -63,7 +68,7 @@ def sun397(root, split="train", transform=None, index="01"):
         x.append(os.path.join(root, "SUN397", image[1:] ) )
         y.append(label_list[class_part])
     
-    return BasicDataset(x,y, load_image=True)
+    return BasicDataset(x,y, load_image=True, transform=transform)
     
     
 def caltech101(root, split="train", transform=None, permutation_tensor=None):
@@ -75,16 +80,20 @@ def caltech101(root, split="train", transform=None, permutation_tensor=None):
         x,y = dataset[idx]
         if sampled_count[y] < 30:
             train_indices.append(idx)
+            sampled_count[y] += 1
         else:
-            test_indices.append(idx)
+            val_indices.append(idx)
 
-    return torch.utils.data.Subset(dataset, test_indices if split == "val" else train_indices)
+    return torch.utils.data.Subset(dataset, val_indices if split == "val" else train_indices)
     
 
 def _index_sun397():
     idx = str(np.random.randint(1,11))
     return "0" * (2 - len(idx) ) + idx
-    
+
+def _index_dtd():
+    return np.random.randint(1,11)
+
 DATASETS = {
     "cifar10" : {
         "dataset_function" : datasets.CIFAR10,
@@ -137,7 +146,7 @@ DATASETS = {
         "evaluation_strategy" : "per-class-mean"
     },
     "aircraft-manufacturer" : {
-        "dataset_function" : partial(datasets.FGVCAircraft, annotation_level="variant"),
+        "dataset_function" : partial(datasets.FGVCAircraft, annotation_level="manufacturer"),
         "mean" : _IMAGENET_MEAN,
         "std" : _IMAGENET_STD,
         "num_classes" : 30,
@@ -145,7 +154,7 @@ DATASETS = {
         "evaluation_strategy" : "per-class-mean"
     },
     "aircraft-family" : {
-        "dataset_function" : partial(datasets.FGVCAircraft, annotation_level="variant"),
+        "dataset_function" : partial(datasets.FGVCAircraft, annotation_level="family"),
         "mean" : _IMAGENET_MEAN,
         "std" : _IMAGENET_STD,
         "num_classes" : 70,
@@ -201,7 +210,7 @@ DATASETS = {
         "evaluation_strategy" : "top-1"
     },
     "dtd": {
-        "dataset_function" : datasets.DTD,
+        "dataset_function" : partial(datasets.DTD, partition=_index_dtd()),
         "mean" : _IMAGENET_MEAN,
         "std" : _IMAGENET_STD,
         "num_classes" : 47,
@@ -262,8 +271,28 @@ class TwoBranchDataset(Dataset):
     def __len__(self):
         return len(self.dataset)
 
-
-
+def create_augment(augmentation, finetune=False):
+    aug = [T.Lambda(lambda x: x.convert("RGB"))]
+    for i in augmentation.split("-"):
+        if "identity" in i:
+            if finetune:
+                aug.extend([T.Resize(256, interpolation=T.InterpolationMode.BICUBIC), T.CenterCrop(224),])
+        elif "crop" in i:
+            aug.append(T.RandomResizedCrop(224, interpolation=T.InterpolationMode.BICUBIC) if finetune else T.RandomCrop(32, padding=4) ) 
+        elif "hflip" in i:
+            _, prob = i.split("_")
+            aug.append(T.RandomHorizontalFlip(p=float(prob)))
+        elif "randaug" in i:
+            _, n, m, prob = i.split("_")
+            aug.append( T.RandomApply(transforms=[
+                           T.RandAugment(num_ops=int(n), magnitude=int(m), interpolation=T.InterpolationMode.BICUBIC)
+                        ], p=float(prob)) )
+        elif "cutout" in i:
+            _, c = i.split("_")
+            aug.append(Cutout(length=int(c)))
+    
+    aug.extend([T.ToTensor(), T.Normalize(-1, -1)])
+    return T.Compose(aug)
 
 def load_dataset(args):
     dataset_args = DATASETS[args.task]
@@ -273,19 +302,22 @@ def load_dataset(args):
     args.__dict__["mean"] = mean
     args.__dict__["std"] = std
     args.__dict__["evaluation_strategy"] = evaluation_strategy
-
-    first_transform = _normalization_handler(torch.load(args.first_augmentation), mean, std)
-    second_transform = _normalization_handler(torch.load(args.second_augmentation), mean, std)
     
     if args.model == "wide-resnet":
-        test_transform = T.Compose([T.ToTensor(), T.Normalize(mean=mean, std=std)])
+        test_transform = T.Compose([T.Lambda(lambda x: x.convert("RGB")), T.ToTensor(), T.Normalize(mean=mean, std=std)])
+        finetune=False
     else:
         test_transform = T.Compose([
+                T.Lambda(lambda x: x.convert("RGB")),
                 T.Resize(256, interpolation=T.InterpolationMode.BICUBIC),
                 T.CenterCrop(224),
                 T.ToTensor(),
                 T.Normalize(mean=mean, std=std),
         ])
+        finetune=True
+    
+    first_transform = _normalization_handler(create_augment(args.first_augmentation, finetune), mean, std)
+    second_transform = _normalization_handler(create_augment(args.second_augmentation, finetune), mean, std)
     
     clean_train_data = dataset_function(root=args.datapath, **split_args["train"], transform=test_transform) 
     train_data = dataset_function(root=args.datapath, **split_args["train"], transform=None)
@@ -307,7 +339,7 @@ def load_dataset(args):
     
     print("first transform : ", first_transform)
     print("second transform : ", second_transform)
-    print("test transform : ", test_transform)
+    print("test transform : ", test_transform, flush=True)
     
     args.__dict__["epoch_every"] = len(train_set)
 

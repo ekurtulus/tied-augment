@@ -47,8 +47,8 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import flax.serialization as serialization
 import flax.struct as struct
 from flax import traverse_util
-from flax.core.frozen_dict import freeze
-
+from flax.core.frozen_dict import freeze, unfreeze
+from copy import deepcopy
 
 def create_model(*, model_cls, half_precision, num_classes, **kwargs):
   platform = jax.local_devices()[0].platform
@@ -105,16 +105,18 @@ def cross_entropy_loss(probs, labels, dtype=jnp.float32):
     return -jnp.mean(jnp.sum(probs * labels, axis=-1))
 
 
-@partial(jax.jit, static_argnums=(7,8,9,10,11))
+@partial(jax.jit, static_argnums=(7,8,9,10,11,12))
 def criterion(first_logits, second_logits, first_features, second_features, 
               first_labels, second_labels, similarity_weight=1.0, label_smoothing=0.0, 
-              both_branches_supervised=False, cross_entropy=True, similarity=True, loss_type="l2"):
+              both_branches_supervised=False, cross_entropy=True, similarity=True, loss_type="l2",
+              no_second_forward=False):
     
     num_classes = first_logits.shape[-1]
     
     if label_smoothing > 0:
         first_labels = first_labels * (1 - label_smoothing) + label_smoothing / num_classes
-        second_labels = second_labels * (1 - label_smoothing) + label_smoothing / num_classes
+        if not no_second_forward:
+          second_labels = second_labels * (1 - label_smoothing) + label_smoothing / num_classes
 
     if loss_type == "cosine":
         similarity_fn = cosine_similarity
@@ -126,9 +128,13 @@ def criterion(first_logits, second_logits, first_features, second_features,
         similarity_fn = l2_normalized
     
     first_probs = jax.nn.log_softmax(first_logits.astype(jnp.float32))
-    second_probs = jax.nn.log_softmax(second_logits.astype(jnp.float32))
+    if not no_second_forward:
+      second_probs = jax.nn.log_softmax(second_logits.astype(jnp.float32))
     
     if not similarity and cross_entropy:
+      if no_second_forward:
+        return cross_entropy_loss(first_probs, first_labels)
+      else:  
         return cross_entropy_double(first_probs, second_probs, first_labels, second_labels, 
                                     both_branches_supervised=both_branches_supervised)
     
@@ -169,10 +175,12 @@ def compute_train_metrics(first_logits, first_features, second_logits, second_fe
       'loss': loss,
       'top-1' : top_1,
       'top-5' : top_5,
-      'l2' : (first_features - second_features) ** 2,
-      'l1' : jnp.abs(first_features - second_features),
-      'cosine' : optax.cosine_similarity(first_features, second_features),
   }
+  if second_features is not None or second_logits is not None: 
+      metrics.update(l2=(first_features - second_features) ** 2,
+      l1=jnp.abs(first_features - second_features),
+      cosine=optax.cosine_similarity(first_features, second_features))
+
   metrics = lax.pmean(metrics, axis_name='batch')
   return metrics
 
@@ -283,13 +291,16 @@ def train_step(state, batch, key, learning_rate_fn, config, tw=-1, dropout_key=N
           first_images,
           mutable=['batch_stats'], 
           rngs={"dropout" : dropout_key})
-      
-      (second_features, second_logits), new_model_state = state.apply_fn(
+      if not config.no_second_forward:
+        (second_features, second_logits), new_model_state = state.apply_fn(
           {'params': params, 
           'batch_stats': new_model_state["batch_stats"] if not config.no_second_step_bn_update else state.batch_stats},
           second_images,
           mutable=['batch_stats'], 
           rngs={"dropout" : dropout_key})
+      else:
+        second_features, second_logits = None, None
+        
     
     if config.mixup_alpha > 0:
       second_features = lam * second_features + (1 - lam) * second_features[::-1]
@@ -297,7 +308,8 @@ def train_step(state, batch, key, learning_rate_fn, config, tw=-1, dropout_key=N
     loss = criterion(first_logits, second_logits, first_features, second_features, first_labels,
                      second_labels, both_branches_supervised=config.both_branches_supervised, 
                      similarity_weight=tw, cross_entropy=cross_entropy, similarity=similarity, 
-                     loss_type=loss_type, label_smoothing=config.label_smoothing)
+                     loss_type=loss_type, label_smoothing=config.label_smoothing, 
+                     no_second_forward=config.no_second_forward)
 
     weight_penalty_params = jax.tree_util.tree_leaves(params)
     weight_l2 = sum(jnp.sum(x ** 2)
@@ -347,7 +359,8 @@ def train_step(state, batch, key, learning_rate_fn, config, tw=-1, dropout_key=N
                                      config.sam_second_step, config.loss_type)
         grads = lax.pmean(grads, axis_name='batch')
     else:    
-        grad_fn = jax.value_and_grad(lambda m : loss_fn(m, loss_type=config.loss_type), has_aux=True)
+        grad_fn = jax.value_and_grad(lambda m : loss_fn(m, similarity=not config.no_similarity, 
+                                                           loss_type=config.loss_type), has_aux=True)
         aux, grads = grad_fn(state.params)
         grads = lax.pmean(grads, axis_name='batch')
         aux = aux[1]
@@ -465,11 +478,11 @@ class EmaState:
 
         return self.replace(params=new_ema_params, batch_stats=new_ema_batch_stats)
 
-@struct.dataclass
 class TrainStateExtended(TrainState):
   ema: Any
 
-def create_train_state(rng, config, model, image_size, learning_rate_fn):
+def create_train_state(rng, config, model, image_size, learning_rate_fn, finetune=True,
+                      extended=True):
 
   """Create initial training state."""
   dynamic_scale = None
@@ -485,19 +498,24 @@ def create_train_state(rng, config, model, image_size, learning_rate_fn):
       momentum=config.momentum,
       nesterov=True,
   )  
-  if config.finetuning_checkpoint is not None and config.linear_eval:
+  if config.finetuning_checkpoint is not None and config.linear_eval and finetune:
     partition_optimizers = {'trainable': tx, 'frozen': optax.set_to_zero()}
     param_partitions = freeze(traverse_util.path_aware_map(
-        lambda path, v: 'trainable' if 'fc' in path else 'frozen', params))
+        lambda path, v: 'trainable' if 'Dense_0' in path else 'frozen', params))
+    print("It seems like you are finetuning. The parameters you are training are : ",
+          list(flax.traverse_util.flatten_dict(param_partitions).items()))
     tx = optax.multi_transform(partition_optimizers, param_partitions)
 
-  state = TrainStateExtended.create(
-      apply_fn=model.apply,
-      params=params,
-      tx=tx,
-      batch_stats=batch_stats,
-      dynamic_scale=dynamic_scale,
-      ema=EmaState.create(config.ema_decay, params,  batch_stats) if config.ema_decay != 0 else None)
+  args = dict(
+    apply_fn=model.apply,
+          params=params,
+          tx=tx,
+          batch_stats=batch_stats,
+          dynamic_scale=dynamic_scale,
+  )
+  if extended:
+    args["ema"] = EmaState.create(config.ema_decay, params,  batch_stats) if config.ema_decay != 0 else None
+  state = TrainStateExtended.create(**args) if extended else TrainState.create(**args)
   return state
 
 
@@ -620,8 +638,7 @@ def train_and_evaluate(config) -> TrainState:
 
   if config.steps_per_eval == -1:
     num_validation_examples = dataset_builder.info.splits[
-        'test' if config.dataset in ["cifar10", "cifar100", "svhn_cropped", 
-                                              "cifar10_finetune", "cifar100_finetune"] else 'validation'].num_examples
+        'validation' if config.dataset == "imagenet2012" else 'test'].num_examples
     steps_per_eval = num_validation_examples // config.batch_size
   else:
     steps_per_eval = config.steps_per_eval
@@ -649,12 +666,26 @@ def train_and_evaluate(config) -> TrainState:
     rng, key = jax.random.split(rng)
 
   state = create_train_state((params_rng, dropout_rng), config, model, config.image_size, learning_rate_fn)
-  if config.finetuning_checkpoint is not None:
-    temp_state = create_train_state((params_rng, dropout_rng), config, model, config.image_size, learning_rate_fn)
-    temp_state = restore_checkpoint(temp_state, config.finetuning_checkpoint)
-    params = temp_state.params
-    state = state.replace(params=params)
 
+  if config.finetuning_checkpoint is not None:
+    temp_model = create_model(
+      model_cls=model_cls, half_precision=config.half_precision,
+      num_classes=1000)
+    temp_state = create_train_state((params_rng, dropout_rng), config, temp_model, config.image_size, 
+                                    learning_rate_fn, finetune=False)
+    try:
+      temp_state = restore_checkpoint(temp_state, config.finetuning_checkpoint)
+    except:
+      temp_state = create_train_state((params_rng, dropout_rng), config, temp_model, config.image_size, 
+                                    learning_rate_fn, finetune=False, extended=False)
+      temp_state = restore_checkpoint(temp_state, config.finetuning_checkpoint)
+
+    params = unfreeze(temp_state.params)
+    params["Dense_0"] = deepcopy(unfreeze(state.params["Dense_0"]))
+    params = freeze(params)
+    
+    state = state.replace(params=params)
+    
   state = restore_checkpoint(state, config.workdir)  
 
   # step_offset > 0 if restarting from checkpoint

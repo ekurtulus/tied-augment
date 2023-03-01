@@ -244,8 +244,7 @@ def create_split(dataset_builder, batch_size, train, dtype=tf.float32,
     start = jax.process_index() * split_size
     split = f'train[{start}:{start + split_size}]'
   else:
-    dataset_key = 'validation' if config.dataset not in ['cifar10', 'cifar100', 'svhn_cropped', 
-    'cifar10_finetune', 'cifar100_finetune'] else 'test'
+    dataset_key = 'validation' if config.dataset == "imagenet2012" else "test"
     validate_examples = dataset_builder.info.splits[dataset_key].num_examples
     split_size = validate_examples // jax.process_count()
     start = jax.process_index() * split_size

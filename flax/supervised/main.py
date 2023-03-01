@@ -27,11 +27,7 @@ from absl import app
 from absl import flags
 from absl import logging
 from clu import platform
-import jax
-from ml_collections import config_flags
 import tensorflow as tf
-
-import train
 import warnings
 
 
@@ -74,9 +70,10 @@ flags.DEFINE_string('loss_type', 'l2', 'similarity loss type')
     
 flags.DEFINE_boolean('single_forward', False, 'whether single forward pass is done instead of 2 forward passes')
 flags.DEFINE_boolean('no_second_step_bn_update', False, 'whether single forward pass is done instead of 2 forward passes')
-    
-flags.DEFINE_string('first_transform', 'hflip-randaug_n2_m14_p1', 'augmentation for the left branch')
-flags.DEFINE_string('second_transform', 'hflip-randaug_n2_m14_p1', 'augmentation for the right branch') 
+flags.DEFINE_boolean('no_second_forward', False, 'whether to avoid the second step')
+
+flags.DEFINE_string('first_transform', 'hflip', 'augmentation for the left branch')
+flags.DEFINE_string('second_transform', 'hflip', 'augmentation for the right branch') 
 
 flags.DEFINE_float('rho', 0, 'SAM rho (if 0, SAM is not applied)')
 flags.DEFINE_string('sam_first_step', 'ce-similarity', 'first step of sam')
@@ -85,6 +82,7 @@ flags.DEFINE_string('sam_second_step', 'ce-similarity', 'second step of sam')
 flags.DEFINE_float('mixup_alpha', 0.0, 'mixup alpha (if 0, no mixup is applied')
 flags.DEFINE_string('finetuning_checkpoint', None, 'finetuning checkpoint to load from if the task is finetuning')
 flags.DEFINE_boolean('linear_eval', False, 'if finetuning, use linear eval if true else full fine-tuning')
+flags.DEFINE_boolean('no_similarity', False, '')
 
 def main(argv):
   if len(argv) > 1:
@@ -94,6 +92,10 @@ def main(argv):
   # it unavailable to JAX.
   tf.config.experimental.set_visible_devices([], 'GPU')
 
+  import jax
+  from ml_collections import config_flags
+  import train
+  
   logging.info('JAX process: %d / %d', jax.process_index(), jax.process_count())
   logging.info('JAX local devices: %r', jax.local_devices())
 

@@ -136,7 +136,7 @@ class ResNet(nn.Module):
                            norm=norm,
                            act=self.act)(x)
     out = jnp.mean(x, axis=(1, 2))
-    x = nn.Dense(self.num_classes, name="fc", dtype=self.dtype)(out)
+    x = nn.Dense(self.num_classes, dtype=self.dtype)(out)
     
     out = jnp.asarray(out, self.dtype)
     x = jnp.asarray(x, self.dtype)
@@ -662,7 +662,7 @@ class ResNetRS(nn.Module):
             )(x, train) 
         features = jnp.mean(x, axis=(1,2))  # global average pooling
         x = nn.Dropout(self.dropout_rate, deterministic=not train, name="top_dropout")(features)
-        x = nn.Dense(self.num_classes, name="fc", dtype=self.dtype)(x)
+        x = nn.Dense(self.num_classes, dtype=self.dtype)(x)
         x = nn.softmax(x)
         return features, x
 
