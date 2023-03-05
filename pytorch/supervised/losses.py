@@ -233,9 +233,9 @@ class SupervisedWrapper(nn.Module):
         
         return loss
 
-class ContrastiveLayerwiseWrapper(nn.Module):
+class SimilarityLayerwiseWrapper(nn.Module):
     def __init__(self, args, loss):
-        super(ContrastiveLayerwiseWrapper, self).__init__()
+        super(SimilarityLayerwiseWrapper, self).__init__()
         self.layers = args.feature_layers
         self.layer_weights = args.feature_layers_weights
         self.loss = loss
@@ -250,24 +250,24 @@ class ContrastiveLayerwiseWrapper(nn.Module):
             return self.loss(first_features, second_features)
     
     
-def contrastive_handler(args):
-    if args.contrastive_loss == "cosine":
-        contrastive = MeanWrapper(nn.CosineSimilarity())
-    elif args.contrastive_loss == "mae":
-        contrastive = nn.L1Loss(reduction="mean")
-    elif args.contrastive_loss == "mse":
-        contrastive = nn.MSELoss(reduction="mean")
-    elif args.contrastive_loss == "cka":
-        contrastive = CKA()
-    elif args.contrastive_loss == "l2-norm":
-        contrastive = L2Norm()
-    elif args.contrastive_loss == "cosine-l2-norm":
-        contrastive = CosineL2Norm()
-    elif args.contrastive_loss == "vicreg":
-        contrastive = VicReg(sim_loss_weight=args.vicreg_sim_weight,
+def similarity_handler(args):
+    if args.similarity_loss == "cosine":
+        similarity = MeanWrapper(nn.CosineSimilarity())
+    elif args.similarity_loss == "mae":
+        similarity = nn.L1Loss(reduction="mean")
+    elif args.similarity_loss == "mse":
+        similarity = nn.MSELoss(reduction="mean")
+    elif args.similarity_loss == "cka":
+        similarity = CKA()
+    elif args.similarity_loss == "l2-norm":
+        similarity = L2Norm()
+    elif args.similarity_loss == "cosine-l2-norm":
+        similarity = CosineL2Norm()
+    elif args.similarity_loss == "vicreg":
+        similarity = VicReg(sim_loss_weight=args.vicreg_sim_weight,
                              var_loss_weight=args.vicreg_var_weight,
                              cov_loss_weight=args.vicreg_cov_weight,)    
-    return ContrastiveLayerwiseWrapper(args, contrastive)
+    return SimilarityLayerwiseWrapper(args, similarity)
 
         
 class CriterionHandler(nn.Module):
@@ -275,7 +275,7 @@ class CriterionHandler(nn.Module):
         super(CriterionHandler, self).__init__()
         self.args = args
         
-        self.contrastive = contrastive_handler(args)
+        self.similarity = similarity_handler(args)
         
         supervised = nn.CrossEntropyLoss() if not args.poly_loss else Poly1CrossEntropyLoss(epsilon=args.poly_eps)
         self.supervised = SupervisedWrapper(supervised, 
@@ -283,56 +283,56 @@ class CriterionHandler(nn.Module):
                                             divergence_weight=args.divergence_weight, 
                                             both_branches_supervised=args.both_branches_supervised)
         
-        self.contrastive_weight = args.contrastive_weight
-        self.cosine_schedule = args.cosine_schedule
+        self.similarity_weight = args.similarity_weight
+        self.similarity_schedule = args.similarity_schedule
         self.step = 0
         self.steps = steps
         self.printed = False
 
         
     def cosine_weight_handler(self):
-        if self.cosine_schedule == "constant":
-            similarity_weight = self.contrastive_weight
-        elif self.cosine_schedule == "random":
-            similarity_weight = np.random.uniform(-self.contrastive_weight, self.contrastive_weight)
-        elif self.cosine_schedule == "probabilistic":
+        if self.similarity_schedule == "constant":
+            similarity_weight = self.similarity_weight
+        elif self.similarity_schedule == "random":
+            similarity_weight = np.random.uniform(-self.similarity_weight, self.similarity_weight)
+        elif self.similarity_schedule == "probabilistic":
             if np.random.rand() > 0.5:
-                similarity_weight = self.contrastive_weight
+                similarity_weight = self.similarity_weight
             else:
-                similarity_weight = -self.contrastive_weight
+                similarity_weight = -self.similarity_weight
         
-        elif self.cosine_schedule == "negate_even":
+        elif self.similarity_schedule == "negate_even":
             if self.step % 2 == 0:
-                similarity_weight = -self.contrastive_weight
+                similarity_weight = -self.similarity_weight
             else:
-                similarity_weight = self.contrastive_weight
+                similarity_weight = self.similarity_weight
 
-        elif self.cosine_schedule == "negate_odd":
+        elif self.similarity_schedule == "negate_odd":
             if self.step % 2 == 0:
-                similarity_weight = self.contrastive_weight
+                similarity_weight = self.similarity_weight
             else:
-                similarity_weight = -self.contrastive_weight
+                similarity_weight = -self.similarity_weight
 
-        elif self.cosine_schedule == "warmup":
+        elif self.similarity_schedule == "warmup":
             if self.step > (self.steps) // 10:
                 if not self.printed:
                     print("cosine warmup done !", flush=True)
                     self.printed=True
-                similarity_weight = self.contrastive_weight
+                similarity_weight = self.similarity_weight
             
-            similarity_weight = np.linspace(0, self.contrastive_weight, self.steps)[self.step]
+            similarity_weight = np.linspace(0, self.similarity_weight, self.steps)[self.step]
 
-        elif self.cosine_schedule == "linear":
-            similarity_weight = np.linspace(0, self.contrastive_weight, self.steps)[self.step]
+        elif self.similarity_schedule == "linear":
+            similarity_weight = np.linspace(0, self.similarity_weight, self.steps)[self.step]
 
         self.step += 1
         return similarity_weight
     
-    def forward(self, first_logits, second_logits, first_features, second_features, y, ce, contrastive):
-        contrastive_weight = self.cosine_weight_handler()
-        if ce and contrastive:
-            return self.supervised(first_logits, second_logits, y) - self.contrastive_weight * self.contrastive(first_features, second_features)
+    def forward(self, first_logits, second_logits, first_features, second_features, y, ce, similarity):
+        similarity_weight = self.cosine_weight_handler()
+        if ce and similarity:
+            return self.supervised(first_logits, second_logits, y) + similarity_weight * self.similarity(first_features, second_features)
         elif ce:
             return self.supervised(first_logits, second_logits, y) 
-        elif contrastive:
-            return -self.contrastive_weight * self.contrastive(first_features, second_features)
+        elif similarity:
+            return self.similarity_weight * similarity(first_features, second_features)

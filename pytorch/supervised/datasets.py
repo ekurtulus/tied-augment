@@ -2,7 +2,7 @@ import torch
 from torch.utils.data import DataLoader, Dataset, Subset
 from torchvision import datasets, transforms as T
 from functools import partial
-from augmentations import *
+from augmentations import Cutout, create_augment, _remove_crop_hflip, _normalization_handler
 from math import ceil
 from PIL import Image
 
@@ -236,21 +236,6 @@ DATASETS = {
         
 }
 
-def _remove_crop_hflip(transform):
-    temp = []
-    for i in range(len(transform.transforms)):
-        if isinstance(transform.transforms[i], T.RandomHorizontalFlip) or isinstance(transform.transforms[i], T.RandomCrop):
-            temp.append(transform.transforms[i])
-            transform.transforms[i] = torch.nn.Identity()   
-    return T.Compose(temp)
-
-def _normalization_handler(transform, mean, std):
-    for i in range(len(transform.transforms)):
-        if isinstance(transform.transforms[i], T.Normalize):
-            transform.transforms[i].mean = mean
-            transform.transforms[i].std = std
-    return transform
-
 class TwoBranchDataset(Dataset):
     def __init__(self, dataset, first_transform, second_transform, use_same_crop=False):
         self.dataset = dataset
@@ -270,29 +255,6 @@ class TwoBranchDataset(Dataset):
 
     def __len__(self):
         return len(self.dataset)
-
-def create_augment(augmentation, finetune=False):
-    aug = [T.Lambda(lambda x: x.convert("RGB"))]
-    for i in augmentation.split("-"):
-        if "identity" in i:
-            if finetune:
-                aug.extend([T.Resize(256, interpolation=T.InterpolationMode.BICUBIC), T.CenterCrop(224),])
-        elif "crop" in i:
-            aug.append(T.RandomResizedCrop(224, interpolation=T.InterpolationMode.BICUBIC) if finetune else T.RandomCrop(32, padding=4) ) 
-        elif "hflip" in i:
-            _, prob = i.split("_")
-            aug.append(T.RandomHorizontalFlip(p=float(prob)))
-        elif "randaug" in i:
-            _, n, m, prob = i.split("_")
-            aug.append( T.RandomApply(transforms=[
-                           T.RandAugment(num_ops=int(n), magnitude=int(m), interpolation=T.InterpolationMode.BICUBIC)
-                        ], p=float(prob)) )
-        elif "cutout" in i:
-            _, c = i.split("_")
-            aug.append(Cutout(length=int(c)))
-    
-    aug.extend([T.ToTensor(), T.Normalize(-1, -1)])
-    return T.Compose(aug)
 
 def load_dataset(args):
     dataset_args = DATASETS[args.task]

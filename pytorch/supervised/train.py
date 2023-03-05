@@ -38,12 +38,12 @@ def normal_step(batch, model, criterion, device, step, optimizer, args, sam=Fals
         first_logits, second_logits, first_features, second_features = _forward(model, first, 
                                                                                 second, single_forward=args.single_forward)
         loss = criterion(first_logits, second_logits, first_features, second_features, y,
-                                     ce=True, contrastive=True)
+                                     ce=True, similarity=True)
     elif step == "similarity-only":
         first_logits, second_logits, first_features, second_features = _forward(model, first, 
                                                                                 second, single_forward=args.single_forward)
         loss = criterion(first_logits, second_logits, first_features, second_features, y,
-                                     ce=False, contrastive=True)
+                                     ce=False, similarity=True)
     else:
         raise ValueError("Unknown step : " + step)
         
@@ -257,7 +257,7 @@ def run(args):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="The real and most logical way of supervised contrastive learning.")
+    parser = argparse.ArgumentParser(description="The real and most logical way of supervised similarity learning.")
 
     # required args
     parser.add_argument("--model", required=True)
@@ -271,9 +271,9 @@ if __name__ == "__main__":
     parser.add_argument("--robustness-path")
 
     # tied-augment args
-    parser.add_argument("--contrastive_loss", type=str, default="mse", choices=["cosine", "vicreg", "cka", "mse", "mae",
+    parser.add_argument("--similarity_loss", type=str, default="mse", choices=["cosine", "vicreg", "cka", "mse", "mae",
                                                                                    "l2-norm", "cosine-l2-norm"])
-    parser.add_argument("--contrastive_weight", type=float, default=1)
+    parser.add_argument("--similarity_weight", type=float, default=1)
     
     parser.add_argument("--vicreg_cov_weight", type=float, default=1 / 25)
     parser.add_argument("--vicreg_sim_weight", type=float, default=25 / 25)
@@ -450,4 +450,3 @@ if __name__ == "__main__":
     with open(args.outfile, "w") as data:
         data.write(json.dumps(out_file)) 
     """
-                   

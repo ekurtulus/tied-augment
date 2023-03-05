@@ -88,7 +88,7 @@ def handle_scheduler(optimizer, n_iters, args):
         scheduler = torch.optim.lr_scheduler.MultiplicativeLR(base_optimizer, Dummy(args.mult_factor))
     
     elif args.scheduler == "exponential":
-        scheduler = torch.optim.lr_scheduler.ExponentialLR(base_optimizer, mult_factor)
+        scheduler = torch.optim.lr_scheduler.ExponentialLR(base_optimizer, args.mult_factor)
     
     else:
         raise ValueError("Unknown scheduler : ", args.scheduler)
@@ -306,6 +306,3 @@ def calculate_norms(model, first_logits, second_logits, first_features, second_f
             "feature-l2" : nn.functional.mse_loss(first_features, second_features).item(),
             "feature-l1" : nn.functional.l1_loss(first_features, second_features).item(),
            }
-                    
-                    
-                    
