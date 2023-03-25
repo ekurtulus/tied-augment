@@ -358,7 +358,7 @@ if __name__ == "__main__":
     parser.add_argument("--sam_batch_handling", action="store_true")
     
     # Misc arguments
-    parser.add_argument("--cosine_schedule", default="constant")    
+    parser.add_argument("--similarity_schedule", default="constant")    
     parser.add_argument("--no_checkpoint", action="store_true")
     parser.add_argument("--step_function", default="tied-augment")
     parser.add_argument("--single_forward", action="store_true")

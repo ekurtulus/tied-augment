@@ -6,8 +6,9 @@ import math
 import random
 from torchvision import transforms as T
 
-def create_augment(augmentation, finetune=False):
+def create_augment(augmentation, mean, std, finetune=False):
     aug = [T.Lambda(lambda x: x.convert("RGB"))]
+    cutout_params = (False, None)
     for i in augmentation.split("-"):
         if "identity" in i:
             if finetune:
@@ -24,9 +25,11 @@ def create_augment(augmentation, finetune=False):
                         ], p=float(prob)) )
         elif "cutout" in i:
             _, c = i.split("_")
-            aug.append(Cutout(length=int(c)))
+            cutout_params = (True, int(c))
+    aug.extend([T.ToTensor(), T.Normalize(mean, std)])
+    if cutout_params[0]:
+        aug.append(Cutout(length=cutout_params[1]))
     
-    aug.extend([T.ToTensor(), T.Normalize(-1, -1)])
     return T.Compose(aug)
 
 def _remove_crop_hflip(transform):

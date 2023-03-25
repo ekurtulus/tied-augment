@@ -2,9 +2,10 @@ import torch
 from torch.utils.data import DataLoader, Dataset, Subset
 from torchvision import datasets, transforms as T
 from functools import partial
-from augmentations import Cutout, create_augment, _remove_crop_hflip, _normalization_handler
+from augmentations import Cutout, create_augment, _remove_crop_hflip
 from math import ceil
 from PIL import Image
+import numpy as np
 
 _IMAGENET_MEAN = torch.tensor([0.485, 0.456, 0.406])
 _IMAGENET_STD = torch.tensor([0.229, 0.224, 0.225])
@@ -278,8 +279,8 @@ def load_dataset(args):
         ])
         finetune=True
     
-    first_transform = _normalization_handler(create_augment(args.first_augmentation, finetune), mean, std)
-    second_transform = _normalization_handler(create_augment(args.second_augmentation, finetune), mean, std)
+    first_transform = create_augment(args.first_augmentation, mean, std, finetune=finetune)
+    second_transform = create_augment(args.second_augmentation, mean, std, finetune=finetune)
     
     clean_train_data = dataset_function(root=args.datapath, **split_args["train"], transform=test_transform) 
     train_data = dataset_function(root=args.datapath, **split_args["train"], transform=None)
