@@ -184,8 +184,8 @@ def create_model(args):
     if args.model == "wide-resnet":
         model = WideResNet(args.resnet_depth, args.num_classes, widen_factor=args.resnet_width, dropRate=args.dropout).train()
     else:
-        model = ResnetWrapper(models.resnet50(pretrained=True), args.num_classes).train()
-        #model = TimmWrapper(timm.create_model(args.model, num_classes=0, pretrained=True), args.num_classes)
+        #model = ResnetWrapper(models.resnet50(pretrained=True), args.num_classes).train()
+        model = TimmWrapper(timm.create_model(args.model, num_classes=0, pretrained=True), args.num_classes)
             
     if args.freeze_layers:
         freeze_layers(model)
