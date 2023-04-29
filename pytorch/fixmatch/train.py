@@ -569,6 +569,8 @@ if __name__ == '__main__':
     parser.add_argument('--no-progress', action='store_true',
                         help="don't use progress bar")
     
+    # Tied-FixMatch algorithm
+
     parser.add_argument("--tied_augment", action="store_true")
     parser.add_argument("--similarity_loss_on", default="unlabeled", 
                                                 choices=["labeled", "unlabeled"])

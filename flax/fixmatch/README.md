@@ -1,0 +1,2 @@
+# Tied-FixMatch Flax
+This repository is an attempt to re-implement Tied-FixMatch in JAX. However, this folder is not fully tested and it is advised to use the Pytorch folder for FixMatch experiments instead. 

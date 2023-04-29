@@ -1,0 +1,2 @@
+# Tied-Augment on ImageNet
+This repository aims to re-implement the Flax ImageNet code; however, this folder is not fully tested and not guaranteed to perform the same as Flax folder. Therefore, it is advised to use it instead of this one.
