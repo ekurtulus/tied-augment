@@ -16,6 +16,8 @@ We present the implementation of Tied-Augment both in Jax and Pytorch frameworks
 
 Other subfolders are in experimental stage and are not guaranteed to replicate the results. 
 
+We also have a PR for implementing Tied-Augment in [pytorch-image-models](https://github.com/huggingface/pytorch-image-models/pull/1974).
+
 ### Citing This Work
 ```bibtex
 @article{kurtulus2023tiedaugment,
